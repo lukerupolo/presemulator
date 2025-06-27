@@ -1,230 +1,149 @@
 import streamlit as st
 from pptx import Presentation
-from pptx.util import Pt
-from pptx.enum.dml import MSO_THEME_COLOR
-import openai
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 import io
 import os
-import json
+import openai
+import copy
+from lxml.etree import ElementBase
 
-# --- Core Functions ---
+# --- Core PowerPoint Functions ---
 
-def find_title_and_body_shapes(slide):
-    """Finds the title and body shapes on a slide using heuristics."""
-    title_shape, body_shape = None, None
+def clone_slide(pres, slide_to_clone):
+    """
+    Duplicates a slide from a source presentation into a target presentation.
+    This is a complex but necessary function to ensure a high-fidelity copy.
+    """
+    # 1. Add a blank slide to the target presentation
+    blank_slide_layout = pres.slide_layouts[6] # Index 6 is typically a blank layout
+    new_slide = pres.slides.add_slide(blank_slide_layout)
+
+    # 2. Copy background
+    new_slide.background.fill.solid()
+    new_slide.background.fill.fore_color.rgb = slide_to_clone.background.fill.fore_color.rgb
+    
+    # 3. Copy shapes from the original slide to the new slide
+    for shape in slide_to_clone.shapes:
+        if shape.is_placeholder:
+            # Handle placeholders by creating a new one
+            ph = shape.placeholder_format
+            new_ph = new_slide.placeholders.add_placeholder(ph.idx, ph.type, shape.left, shape.top, shape.width, shape.height)
+            # Copy text and formatting
+            if shape.has_text_frame:
+                new_ph.text_frame.text = shape.text_frame.text
+        else:
+            # For non-placeholder shapes, we copy them by creating a new element
+            new_el = copy.deepcopy(shape.element)
+            new_slide.shapes._spTree.insert_element_before(new_el, 'p:extLst')
+
+    return new_slide
+
+def find_slide_by_title(prs, title):
+    """Finds the first slide in a presentation that contains a specific title."""
+    for i, slide in enumerate(prs.slides):
+        for shape in slide.shapes:
+            if shape.has_text_frame and title.lower() in shape.text.lower():
+                return slide
+    return None
+
+def populate_title_slide(slide, project_name, subtitle):
+    """Populates the placeholders on a title slide with new text."""
+    title_placeholder = None
+    subtitle_placeholder = None
+
+    # Find title and subtitle placeholders
     for shape in slide.placeholders:
-        if 'TITLE' in shape.placeholder_format.type.name:
-            title_shape = shape
-        elif 'BODY' in shape.placeholder_format.type.name or 'OBJECT' in shape.placeholder_format.type.name:
-            body_shape = shape
-    if not title_shape and not body_shape: # Fallback for non-standard slides
-        text_boxes = sorted([s for s in slide.shapes if s.has_text_frame and s.text.strip()], key=lambda s: len(s.text), reverse=True)
-        if len(text_boxes) >= 1: body_shape = text_boxes[0]
-        if len(text_boxes) >= 2: title_shape = text_boxes[1]
-    return title_shape, body_shape
+        if shape.placeholder_format.type.name in ('TITLE', 'CENTER_TITLE'):
+            title_placeholder = shape
+        elif shape.placeholder_format.type.name == 'SUBTITLE':
+            subtitle_placeholder = shape
+            
+    # If standard placeholders aren't found, use heuristics
+    if not title_placeholder or not subtitle_placeholder:
+         text_boxes = sorted([s for s in slide.shapes if s.has_text_frame], key=lambda s: s.top)
+         if len(text_boxes) >= 2:
+             title_placeholder = text_boxes[0]
+             subtitle_placeholder = text_boxes[1]
 
-def extract_text_from_slide(slide):
-    """Extracts all text from a single slide for classification."""
-    return " ".join(shape.text for shape in slide.shapes if shape.has_text_frame)
-
-def classify_slides(api_key, slides_text):
-    """Uses AI to classify each slide."""
-    try:
-        client = openai.OpenAI(api_key=api_key)
-    except Exception as e:
-        raise ValueError(f"Failed to initialize OpenAI client: {e}")
-
-    system_prompt = """
-    You are a presentation analyst. You will be given a JSON object with slide numbers and their text content.
-    Your task is to classify each slide's primary purpose. The valid classifications are: "Objectives", "Timeline", or "Other".
-    You MUST return a JSON object with a single key 'classifications', containing a list of strings (e.g., ["Objectives", "Timeline", "Other", ...]).
-    This list must have the exact same number of elements as the input.
-    """
-    full_user_prompt = f"Classify the following slide contents:\n{json.dumps(slides_text, indent=2)}"
-    
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4-turbo",
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": full_user_prompt}],
-            response_format={"type": "json_object"}
-        )
-        return json.loads(response.choices[0].message.content)['classifications']
-    except Exception as e:
-        st.error(f"AI classification failed: {e}")
-        return None
-
-def delete_slides(prs, indices_to_delete):
-    """Deletes slides from a presentation object by their indices."""
-    slides = prs.slides
-    # Sort indices in descending order to avoid re-indexing issues during deletion
-    for idx in sorted(indices_to_delete, reverse=True):
-        rId = slides._sldIdLst[idx].rId
-        slides.part.drop_rel(rId)
-        del slides._sldIdLst[idx]
-
-def get_ai_modified_timeline_content(api_key, slide_content):
-    """Sends timeline content to the AI with a specific prompt."""
-    try:
-        client = openai.OpenAI(api_key=api_key)
-    except Exception as e:
-        raise ValueError(f"Failed to initialize OpenAI client: {e}")
-
-    system_prompt = """
-    You are a marketing manager working on a regional response deck. You will be given the content of a timeline slide.
-    Your task is to rewrite the content, filling in the necessary parts of the timeline section that will be adjusted for relevant regional responses. 
-    Insert a clear placeholder like '[INSERT REGIONAL DETAIL HERE]' where specific local information needs to be added.
-    Return a JSON object with 'title' and 'body' keys containing the rewritten text.
-    """
-    full_user_prompt = f"Adapt the following timeline slide content:\n{json.dumps(slide_content, indent=2)}"
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4-turbo",
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": full_user_prompt}],
-            response_format={"type": "json_object"}
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        st.error(f"AI content modification for timeline failed: {e}")
-        return slide_content # Return original on failure
-
-def preserve_and_set_text(text_frame, new_text):
-    """Replaces text in a text_frame while preserving formatting."""
-    if not text_frame.paragraphs:
-        p = text_frame.add_paragraph()
-    else:
-        p = text_frame.paragraphs[0]
-        
-    font_name, font_size, font_bold, font_italic, font_color = None, Pt(18), None, None, None
-    if p.runs:
-        original_font = p.runs[0].font
-        font_name, font_size, font_bold, font_italic, font_color = original_font.name, original_font.size, original_font.bold, original_font.italic, original_font.color
-    
-    for para in list(text_frame.paragraphs):
-        p_element = para._p
-        p_element.getparent().remove(p_element)
-
-    p = text_frame.add_paragraph()
-    run = p.add_run()
-    run.text = new_text
-    
-    font = run.font
-    if font_name: font.name = font_name
-    if font_size: font.size = font_size
-    if font_bold is not None: font.bold = font_bold
-    if font_italic is not None: font.italic = font_italic
-    if font_color:
-        if font_color.type == MSO_THEME_COLOR:
-            font.color.theme_color, font.color.brightness = font_color.theme_color, font_color.brightness
-        elif hasattr(font_color, 'rgb'):
-            font.color.rgb = font_color.rgb
-
-# --- UI Functions ---
-def display_summary(summary_data):
-    st.subheader("📝 Summary of Modifications")
-    for item in summary_data:
-        st.markdown(f"---")
-        st.markdown(f"### Slide {item['slide_number']} (Kept as: **{item['classification']}**)")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Before**")
-            st.text_area("Title", value=item['original']['title'], height=70, disabled=True, key=f"orig_title_{item['slide_number']}")
-            st.text_area("Body", value=item['original']['body'], height=200, disabled=True, key=f"orig_body_{item['slide_number']}")
-        with col2:
-            st.markdown("**After**")
-            st.text_area("Title", value=item['modified']['title'], height=70, disabled=True, key=f"mod_title_{item['slide_number']}")
-            st.text_area("Body", value=item['modified']['body'], height=200, disabled=True, key=f"mod_body_{item['slide_number']}")
+    if title_placeholder:
+        title_placeholder.text = project_name
+    if subtitle_placeholder:
+        subtitle_placeholder.text = subtitle
 
 # --- Streamlit App ---
-st.set_page_config(page_title="AI Presentation Pruner & Editor", layout="wide")
-st.title("🤖 AI Presentation Pruner & Editor")
-st.write("This tool automatically identifies and keeps only 'Objectives' and 'Timeline' slides, then intelligently adapts the timeline content for regional responses.")
 
-# CORRECTED: The sidebar now only contains the API key input and the file uploader.
-with st.sidebar:
-    st.header("Controls")
-    api_key = st.text_input("Enter your OpenAI API Key", type="password")
-    st.markdown("---")
-    uploaded_file = st.file_uploader("Upload a PowerPoint (.pptx)", type=["pptx"])
+st.set_page_config(page_title="AI Presentation Generator", layout="wide")
+st.title("🤖 AI Presentation Generator from Template")
+st.write("This tool uses a template presentation as a 'slide bank' to build new decks, ensuring perfect style emulation.")
 
-if uploaded_file is not None:
-    if st.button("✨ Process Presentation", type="primary"):
-        if not api_key:
-            st.error("Please enter your OpenAI API key.")
-        else:
-            with st.spinner("Processing... This is a multi-step process and may take some time."):
-                try:
-                    file_content = uploaded_file.getvalue()
-                    prs = Presentation(io.BytesIO(file_content))
-                    
-                    st.write("Step 1/5: Analyzing and classifying all slides...")
-                    slides_text_for_classification = [{"slide_number": i+1, "text": extract_text_from_slide(s)} for i, s in enumerate(prs.slides)]
-                    classifications = classify_slides(api_key, slides_text_for_classification)
-                    
-                    if not classifications: raise ValueError("Could not classify slides.")
+# --- UI for File Uploads ---
+st.header("1. Upload Your Files")
+col1, col2 = st.columns(2)
 
-                    st.write("Step 2/5: Pruning presentation based on classification...")
-                    indices_to_delete = []
-                    kept_slides_info = []
-                    for i, classification in enumerate(classifications):
-                        if classification not in ["Objectives", "Timeline"]:
-                            indices_to_delete.append(i)
-                        else:
-                            title_shape, body_shape = find_title_and_body_shapes(prs.slides[i])
-                            kept_slides_info.append({
-                                "original_index": i,
-                                "classification": classification,
-                                "original_content": {"title": title_shape.text if title_shape else "", "body": body_shape.text if body_shape else ""}
-                            })
-                    
-                    delete_slides(prs, indices_to_delete)
-                    st.write(f"Kept {len(kept_slides_info)} slide(s) and deleted {len(indices_to_delete)} slide(s).")
+with col1:
+    template_file = st.file_uploader("Upload Template Deck (.pptx)", type=["pptx"], help="This presentation will be used as a 'slide bank' for styles and layouts.")
 
-                    st.write("Step 3/5: Adapting content for kept slides...")
-                    summary_data = []
-                    final_slides = prs.slides
-                    for i in range(len(final_slides)):
-                        slide_info = kept_slides_info[i]
-                        current_content = slide_info["original_content"]
-                        modified_content = {}
+with col2:
+    # In the future, this could be a content deck or just a prompt
+    content_prompt = st.text_input("Enter the main topic for the presentation", value="Quarterly Marketing Plan", help="For this demo, this will be used to generate a title.")
 
-                        if slide_info["classification"] == "Objectives":
-                            modified_content = current_content # Perfect copy
-                        
-                        elif slide_info["classification"] == "Timeline":
-                            modified_content = get_ai_modified_timeline_content(api_key, current_content)
 
-                        title_shape, body_shape = find_title_and_body_shapes(final_slides[i])
-                        if title_shape: preserve_and_set_text(title_shape.text_frame, modified_content.get('title', ''))
-                        if body_shape: preserve_and_set_text(body_shape.text_frame, modified_content.get('body', ''))
+# --- Main Logic ---
+if template_file and content_prompt:
+    if st.button("🚀 Generate Presentation", type="primary"):
+        with st.spinner("Building your presentation..."):
+            try:
+                # --- Step 1: Load the template and find the title slide ---
+                st.write("Step 1/3: Analyzing template and finding 'Title Page'...")
+                template_bytes = template_file.getvalue()
+                template_prs = Presentation(io.BytesIO(template_bytes))
+                
+                title_slide_from_template = find_slide_by_title(template_prs, "TITLE PAGE")
+                
+                if not title_slide_from_template:
+                    st.error("Could not find a slide with 'TITLE PAGE' in your template. Please ensure one exists.")
+                    st.stop()
+                
+                st.success("Found 'TITLE PAGE' in the template.")
 
-                        summary_data.append({
-                            "slide_number": i + 1,
-                            "classification": slide_info["classification"],
-                            "original": current_content,
-                            "modified": modified_content
-                        })
+                # --- Step 2: Create a new presentation and copy the slide ---
+                st.write("Step 2/3: Creating new deck and copying the title slide...")
+                new_prs = Presentation()
+                
+                # We need to make sure the slide size of the new presentation matches the template
+                new_prs.slide_width = template_prs.slide_width
+                new_prs.slide_height = template_prs.slide_height
 
-                    st.write("Step 4/5: Preparing your download...")
-                    output_buffer = io.BytesIO()
-                    prs.save(output_buffer)
-                    output_buffer.seek(0)
-                    
-                    st.success("🎉 Your presentation has been successfully pruned and modified!")
-                    
-                    st.write("Step 5/5: Generating summary...")
-                    display_summary(summary_data)
-                    
-                    new_filename = f"{os.path.splitext(uploaded_file.name)[0]}_regional_deck.pptx"
-                    st.download_button(
-                        label="Download Modified Presentation",
-                        data=output_buffer,
-                        file_name=new_filename,
-                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    )
-                except Exception as e:
-                    st.error(f"A critical error occurred: {e}")
-                    st.exception(e)
+                copied_slide = clone_slide(new_prs, title_slide_from_template)
+                
+                # --- Step 3: Populate the new slide with AI-generated (or placeholder) content ---
+                st.write("Step 3/3: Populating the new slide with content...")
+                
+                # For this demo, we'll use simple placeholder text as requested.
+                # In a real scenario, this would come from another AI call or content file.
+                project_name = content_prompt
+                subtitle_text = "AI-Generated Content | Regional Strategy"
+
+                populate_title_slide(copied_slide, project_name, subtitle_text)
+                
+                # --- Final Step: Save and provide download ---
+                output_buffer = io.BytesIO()
+                new_prs.save(output_buffer)
+                output_buffer.seek(0)
+
+                st.success("🎉 Your new presentation has been generated!")
+
+                new_filename = f"{project_name.replace(' ', '_')}_presentation.pptx"
+                st.download_button(
+                    label="Download Generated PowerPoint",
+                    data=output_buffer,
+                    file_name=new_filename,
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                )
+
+            except Exception as e:
+                st.error(f"A critical error occurred: {e}")
+                st.exception(e)
+
 else:
-    st.info("Upload a PowerPoint and provide an API key to begin.")
+    st.info("Please upload a template deck and provide a topic to begin.")
