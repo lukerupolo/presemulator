@@ -1,5 +1,5 @@
 # app.py
-# Hybrid Style-Copy PPTX Extractor with Debugging
+# Hybrid Style-Copy PPTX Extractor with Robust Shape Handling
 
 import streamlit as st
 import subprocess
@@ -10,7 +10,7 @@ from pptx import Presentation
 from pptx.dml.color import RGBColor
 
 st.set_page_config(page_title="Hybrid Style-Copy PPTX Extractor")
-st.title("Hybrid Style-Copy PPTX Extractor with Debugging")
+st.title("Hybrid Style-Copy PPTX Extractor with Robust Shape Handling")
 
 # --- Helper Functions ---
 def convert_pdf_to_pptx(pdf_path: str) -> str:
@@ -44,18 +44,18 @@ def copy_shape_style(src_shape, tgt_shape):
     """
     Copy fill, line, and text/font properties from src_shape to tgt_shape.
     """
-    # Fill
-    if src_shape.fill and src_shape.fill.type == 1:
+    # Copy fill
+    if getattr(src_shape, 'fill', None) and src_shape.fill.type == 1:
         tgt_shape.fill.solid()
         rgb = src_shape.fill.fore_color.rgb
         tgt_shape.fill.fore_color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
-    # Line
-    if src_shape.line:
+    # Copy line
+    if getattr(src_shape, 'line', None):
         tgt_shape.line.fill.solid()
         clr = src_shape.line.color.rgb
         tgt_shape.line.color.rgb = RGBColor(clr[0], clr[1], clr[2])
         tgt_shape.line.width = src_shape.line.width
-    # Text & Font
+    # Copy text & font
     if src_shape.has_text_frame and tgt_shape.has_text_frame:
         src_tf = src_shape.text_frame
         tgt_tf = tgt_shape.text_frame
@@ -77,65 +77,75 @@ if not uploaded:
     st.info('Please upload a PowerPoint (.pptx) or PDF file.')
     st.stop()
 
-# Save upload to temp file
+# Save uploaded file to temp
 suffix = os.path.splitext(uploaded.name)[1].lower()
 with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
     tmp_file.write(uploaded.getbuffer())
     tmp_path = tmp_file.name
 
-# Convert PDF if needed
+# Convert PDF if necessary
 if suffix == '.pdf':
     try:
         tmp_path = convert_pdf_to_pptx(tmp_path)
     except Exception as e:
-        st.error(f"PDF → PPTX conversion failed: {e}")
+        st.error(f"PDF→PPTX conversion failed: {e}")
         st.stop()
 
-# Load Presentation
+# Load presentation
 try:
     prs = Presentation(tmp_path)
 except Exception as e:
     st.error(f"Failed to load PPTX: {e}")
     st.stop()
 
-# Debug: Show slide & shape counts
-st.write(f"Found {len(prs.slides)} slides")
-for i, slide in enumerate(prs.slides):
-    st.write(f"Slide {i}: {len(slide.shapes)} shapes")
+# Debug: slide and shape counts
+st.write(f"Found {len(prs.slides)} slide(s)")
+for idx, slide in enumerate(prs.slides):
+    st.write(f"Slide {idx}: {len(slide.shapes)} shape(s)")
 
-# JSON preview of parsed elements
+# JSON preview of parsed slide contents
 slides_json = parse_pptx(tmp_path)
 st.subheader('Parsed Slide Contents')
 st.json(slides_json)
 
-# Hybrid Regenerate button
+# Hybrid Regenerate
 if st.button('Hybrid Regenerate'):
     new_prs = Presentation()
-    # Choose a blank layout (no placeholders)
+    # Select a truly blank layout
     blank_layout = next((l for l in new_prs.slide_layouts if not l.placeholders), new_prs.slide_layouts[0])
-    
+
     for slide_idx, slide in enumerate(prs.slides):
         st.write(f"Regenerating slide {slide_idx}")
         new_slide = new_prs.slides.add_slide(blank_layout)
         for shape in slide.shapes:
-            st.write(f"  Copying shape id={getattr(shape, 'shape_id', 'n/a')} type={getattr(shape, 'auto_shape_type', 'n/a')}")
+            # Safely get shape ID
+            shape_id = getattr(shape, 'shape_id', 'n/a')
+            # Safely get autoshape type
+            try:
+                shape_type = shape.auto_shape_type
+            except Exception:
+                shape_type = None
+            if not shape_type:
+                st.warning(f"Skipping non-autoshape (shape_id={shape_id})")
+                continue
+            st.write(f"  Copying shape id={shape_id} type={shape_type}")
             try:
                 new_shape = new_slide.shapes.add_shape(
-                    shape.auto_shape_type,
+                    shape_type,
                     shape.left, shape.top,
                     shape.width, shape.height
                 )
                 copy_shape_style(shape, new_shape)
             except Exception as e:
-                st.warning(f"    Skipped shape due to error: {e}")
+                st.error(f"Failed to copy shape_id={shape_id}: {e}")
                 continue
-    
+
     # Save regenerated deck
     out_path = tempfile.mktemp(suffix='.pptx')
     new_prs.save(out_path)
     with open(out_path, 'rb') as f:
         data = f.read()
-    st.success('Recreated PPTX ready for download!')
+    st.success('Recreated PPTX is ready!')
     st.download_button(
         'Download Recreated PPTX', data=data,
         file_name='hybrid_recreated.pptx',
