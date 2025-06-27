@@ -5,8 +5,9 @@ import copy
 import uuid
 import openai
 import json
+import requests
 from PIL import Image
-from pptx_tools import utils
+import os
 
 # --- Core PowerPoint Functions ---
 
@@ -74,6 +75,19 @@ def deep_copy_slide(dest_pres, src_slide):
         new_el = copy.deepcopy(shape.element)
         dest_slide.shapes._spTree.insert_element_before(new_el, 'p:extLst')
 
+# --- FIX: New function to create a thumbnail image of a slide ---
+def get_slide_thumbnail(slide):
+    """Creates a PIL Image thumbnail of a slide."""
+    # This is a simplified placeholder. A real implementation would require
+    # a rendering engine or a call to a service that can convert pptx slides to images.
+    # For this app, we'll create a placeholder image with the slide title.
+    title = get_slide_content(slide).get("title", f"Slide {slide.slide_id}")
+    img = Image.new('RGB', (400, 300), color = 'white')
+    from PIL import ImageDraw
+    d = ImageDraw.Draw(img)
+    d.text((10,10), f"Thumbnail for:\n{title[:50]}...", fill=(0,0,0))
+    return img
+
 # --- Streamlit App ---
 st.set_page_config(page_title="Interactive AI Presentation Assembler", layout="wide")
 st.title("🤖 Interactive AI Presentation Assembler")
@@ -110,7 +124,7 @@ with st.sidebar:
         st.rerun()
 
 # --- Main App Logic ---
-if template_file and gtm_file and api_key and st.session_state.structure:
+if template_file and gtm_.file and api_key and st.session_state.structure:
     # Generate Plan Button
     if st.button("1. Generate Build Plan", type="primary"):
         st.session_state.assembly_started = True
@@ -133,7 +147,7 @@ if template_file and gtm_file and api_key and st.session_state.structure:
                     content_result = find_slide_by_ai(api_key, gtm_prs, keyword, gtm_content)
                     plan.append({"keyword": keyword, "action": action, "template_choice": layout_result, "gtm_choice": content_result})
             st.session_state.build_plan = plan
-            st.session_state.template_prs = template_prs # Store for later use
+            st.session_state.template_prs = template_prs
             st.session_state.gtm_prs = gtm_prs
 
 
@@ -149,9 +163,8 @@ if st.session_state.assembly_started and st.session_state.build_plan:
             gtm_choice = item['gtm_choice']
             st.info(f"AI Justification (Content): {gtm_choice['justification']}")
             if gtm_choice['slide']:
-                img_path = f"gtm_slide_{gtm_choice['index']}.png"
-                utils.save_pptx_slide_to_image(st.session_state.gtm_prs, gtm_choice['index'], img_path, "PNG")
-                st.image(img_path, caption=f"Selected GTM Slide {gtm_choice['index']+1}")
+                img = get_slide_thumbnail(gtm_choice['slide'])
+                st.image(img, caption=f"Selected GTM Slide {gtm_choice['index']+1}")
         
         elif item['action'] == "Merge: Template Layout + GTM Content":
             template_choice = item['template_choice']
@@ -161,15 +174,13 @@ if st.session_state.assembly_started and st.session_state.build_plan:
             with col1:
                 st.info(f"AI Justification (Layout): {template_choice['justification']}")
                 if template_choice['slide']:
-                    img_path = f"template_slide_{template_choice['index']}.png"
-                    utils.save_pptx_slide_to_image(st.session_state.template_prs, template_choice['index'], img_path, "PNG")
-                    st.image(img_path, caption=f"Selected Template Layout Slide {template_choice['index']+1}")
+                    img = get_slide_thumbnail(template_choice['slide'])
+                    st.image(img, caption=f"Selected Template Layout Slide {template_choice['index']+1}")
             with col2:
                 st.info(f"AI Justification (Content): {gtm_choice['justification']}")
                 if gtm_choice['slide']:
-                    img_path = f"gtm_slide_{gtm_choice['index']}.png"
-                    utils.save_pptx_slide_to_image(st.session_state.gtm_prs, gtm_choice['index'], img_path, "PNG")
-                    st.image(img_path, caption=f"Selected GTM Content Slide {gtm_choice['index']+1}")
+                    img = get_slide_thumbnail(gtm_choice['slide'])
+                    st.image(img, caption=f"Selected GTM Content Slide {gtm_choice['index']+1}")
 
     st.markdown("---")
     # Assemble Button
