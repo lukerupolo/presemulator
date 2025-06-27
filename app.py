@@ -1,160 +1,101 @@
-# app.py
-# Hybrid Style-Copy PPTX Extractor with Enhanced Color Handling
-
 import streamlit as st
 import subprocess
 import tempfile
 import os
-import shutil
+import json
 from pptx import Presentation
-from pptx.dml.color import RGBColor
+import openai
 
-st.set_page_config(page_title="Hybrid Style-Copy PPTX Extractor")
-st.title("Hybrid Style-Copy PPTX Extractor with Enhanced Color Handling")
+# --- App Config ---
+st.set_page_config(page_title="AI Slide Generator", layout="wide")
+st.title("AI Slide Generator with Template Style")
 
-# --- Helper Functions ---
+# --- Sidebar: OpenAI API Key ---
+api_key = st.sidebar.text_input("OpenAI API Key", type="password")
+if not api_key:
+    st.sidebar.warning("Please enter your OpenAI API Key to proceed.")
+    st.stop()
+openai.api_key = api_key
 
-def convert_pdf_to_pptx(pdf_path: str) -> str:
-    """
-    Convert PDF to PPTX using unoconv. Requires libreoffice/unoconv installed.
-    """
-    pptx_path = pdf_path.replace('.pdf', '.pptx')
-    subprocess.run(['unoconv', '-f', 'pptx', pdf_path], check=True)
-    return pptx_path
-
-
-def parse_pptx(path: str) -> dict:
-    """
-    Parse a PPTX into JSON for preview: slide index and texts of each shape.
-    """
-    prs = Presentation(path)
-    slides = []
-    for idx, slide in enumerate(prs.slides):
-        elements = []
-        for i, shape in enumerate(slide.shapes):
-            tf = getattr(shape, 'text_frame', None)
-            text = ''
-            if tf:
-                text = ''.join(run.text for p in tf.paragraphs for run in p.runs)
-            elements.append({'shape_idx': i, 'text': text})
-        slides.append({'slide_index': idx, 'elements': elements})
-    return {'slides': slides}
-
-
-def copy_shape_style(src_shape, tgt_shape):
-    """
-    Copy fill, line, and text/font properties from src_shape to tgt_shape,
-    safely handling NoneColor and missing attributes.
-    """
-    # Fill (solid only)
-    try:
-        if getattr(src_shape, 'fill', None) and src_shape.fill.type == 1:
-            tgt_shape.fill.solid()
-            rgb = src_shape.fill.fore_color.rgb
-            tgt_shape.fill.fore_color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
-    except Exception:
-        pass
-
-    # Line
-    try:
-        if getattr(src_shape, 'line', None) and getattr(src_shape.line, 'fill', None) and src_shape.line.fill.type == 1:
-            tgt_shape.line.fill.solid()
-            rgb = src_shape.line.color.rgb
-            tgt_shape.line.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
-            tgt_shape.line.width = src_shape.line.width
-    except Exception:
-        pass
-
-    # Text & Font
-    if getattr(src_shape, 'has_text_frame', False) and getattr(tgt_shape, 'has_text_frame', False):
-        src_tf = src_shape.text_frame
-        tgt_tf = tgt_shape.text_frame
-        # Copy full text
-        tgt_tf.text = src_tf.text
-        # Copy first paragraph runs
-        for src_run, tgt_run in zip(src_tf.paragraphs[0].runs, tgt_tf.paragraphs[0].runs):
-            try:
-                tgt_run.font.name = src_run.font.name
-                tgt_run.font.size = src_run.font.size
-                tgt_run.font.bold = src_run.font.bold
-                tgt_run.font.italic = src_run.font.italic
-                tgt_run.font.color.rgb = src_run.font.color.rgb
-            except Exception:
-                pass
-
-# --- Main App Logic ---
-uploaded = st.file_uploader('Upload PPTX or PDF', type=['pptx', 'pdf'])
+# --- File Upload ---
+uploaded = st.file_uploader("Upload a PPTX or PDF template", type=["pptx", "pdf"])
 if not uploaded:
-    st.info('Please upload a PowerPoint (.pptx) or PDF file.')
+    st.info("Awaiting PPTX or PDF template upload...")
     st.stop()
 
-# Save uploaded file to a temp path
+# Save upload to temp file
 suffix = os.path.splitext(uploaded.name)[1].lower()
-with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-    tmp_file.write(uploaded.getbuffer())
-    tmp_path = tmp_file.name
+with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+    tmp.write(uploaded.getbuffer())
+    template_path = tmp.name
 
-# Convert PDF if necessary
-if suffix == '.pdf':
+# Convert PDF to PPTX if needed
+if suffix == ".pdf":
     try:
-        tmp_path = convert_pdf_to_pptx(tmp_path)
+        template_path = template_path.replace('.pdf', '.pptx')
+        subprocess.run(["unoconv", "-f", "pptx", tmp.name], check=True)
     except Exception as e:
-        st.error(f"PDF→PPTX conversion failed: {e}")
+        st.error(f"PDF → PPTX conversion failed: {e}")
         st.stop()
 
-# Load the presentation
-try:
-    prs = Presentation(tmp_path)
-except Exception as e:
-    st.error(f"Failed to load PPTX: {e}")
-    st.stop()
+# --- Slide Generation Parameters ---
+prompt = st.text_area("Enter a prompt for slide content generation", height=150)
+num_slides = st.number_input("Number of slides to generate", min_value=1, max_value=20, value=5)
 
-# Debug: Show slide and shape counts
-st.write(f"Found {len(prs.slides)} slide(s)")
-for idx, slide in enumerate(prs.slides):
-    st.write(f"Slide {idx}: {len(slide.shapes)} shape(s)")
+if st.button("Generate Slides"):
+    if not prompt.strip():
+        st.error("Please provide a prompt for content generation.")
+        st.stop()
 
-# JSON preview of parsed slide contents
-slides_json = parse_pptx(tmp_path)
-st.subheader('Parsed Slide Contents')
-st.json(slides_json)
+    with st.spinner("Generating slide outline with OpenAI..."):
+        system_msg = (
+            "You are an assistant that creates PowerPoint slide outlines. "
+            "Given a user prompt, generate a JSON object with a 'slides' array. "
+            "Each slide entry should have 'title' (string) and 'bullets' (list of strings)."
+        )
+        user_msg = (f"Prompt: {prompt}\nGenerate {num_slides} slides." +
+                    "\nReturn only valid JSON.")
+        try:
+            resp = openai.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg}
+                ],
+                temperature=0.7
+            )
+            outline_json = resp.choices[0].message.content
+            outline = json.loads(outline_json)
+        except Exception as e:
+            st.error(f"OpenAI or JSON parse error: {e}")
+            st.stop()
 
-# Hybrid Regenerate
-if st.button('Hybrid Regenerate'):
-    new_prs = Presentation()
-    # Choose a blank layout (no placeholders)
-    blank_layout = next((l for l in new_prs.slide_layouts if not l.placeholders), new_prs.slide_layouts[0])
+    # --- Build Slides ---
+    try:
+        prs = Presentation(template_path)
+        layout = prs.slide_layouts[1]  # Title & Content
+        for slide_def in outline.get("slides", []):
+            slide = prs.slides.add_slide(layout)
+            slide.shapes.title.text = slide_def.get("title", "")
+            body = slide.placeholders[1].text_frame
+            body.clear()
+            for b in slide_def.get("bullets", []):
+                p = body.add_paragraph()
+                p.text = b
+                p.level = 0
+    except Exception as e:
+        st.error(f"Error generating slides: {e}")
+        st.stop()
 
-    for slide_idx, slide in enumerate(prs.slides):
-        st.write(f"Regenerating slide {slide_idx}")
-        new_slide = new_prs.slides.add_slide(blank_layout)
-        for shape in slide.shapes:
-            # Attempt to get an autoshape type
-            try:
-                shape_type = shape.auto_shape_type
-            except Exception:
-                st.warning(f"Skipping non-autoshape (shape_idx={getattr(shape, 'shape_id', 'n/a')})")
-                continue
-            st.write(f"  Copying shape idx={getattr(shape, 'shape_id', 'n/a')} type={shape_type}")
-            try:
-                new_shape = new_slide.shapes.add_shape(
-                    shape_type,
-                    shape.left, shape.top,
-                    shape.width, shape.height
-                )
-                copy_shape_style(shape, new_shape)
-            except Exception as e:
-                st.error(f"Failed to copy shape (shape_idx={getattr(shape, 'shape_id', 'n/a')}): {e}")
-                continue
-
-    # Save and output the regenerated deck
-    out_path = tempfile.mktemp(suffix='.pptx')
-    new_prs.save(out_path)
+    # --- Download Result ---
+    out_path = tempfile.mktemp(suffix=".pptx")
+    prs.save(out_path)
     with open(out_path, 'rb') as f:
         data = f.read()
-    st.success('Recreated PPTX is ready!')
+    st.success("Slides generated successfully!")
     st.download_button(
-        'Download Recreated PPTX', data=data,
-        file_name='hybrid_recreated.pptx',
-        mime='application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        "Download New Presentation",
+        data=data,
+        file_name="generated_presentation.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
     )
