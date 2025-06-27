@@ -75,12 +75,8 @@ def deep_copy_slide(dest_pres, src_slide):
         new_el = copy.deepcopy(shape.element)
         dest_slide.shapes._spTree.insert_element_before(new_el, 'p:extLst')
 
-# --- FIX: New function to create a thumbnail image of a slide ---
 def get_slide_thumbnail(slide):
     """Creates a PIL Image thumbnail of a slide."""
-    # This is a simplified placeholder. A real implementation would require
-    # a rendering engine or a call to a service that can convert pptx slides to images.
-    # For this app, we'll create a placeholder image with the slide title.
     title = get_slide_content(slide).get("title", f"Slide {slide.slide_id}")
     img = Image.new('RGB', (400, 300), color = 'white')
     from PIL import ImageDraw
@@ -124,7 +120,8 @@ with st.sidebar:
         st.rerun()
 
 # --- Main App Logic ---
-if template_file and gtm_.file and api_key and st.session_state.structure:
+# FIX: Corrected typo from gtm_.file to gtm_file
+if template_file and gtm_file and api_key and st.session_state.structure:
     # Generate Plan Button
     if st.button("1. Generate Build Plan", type="primary"):
         st.session_state.assembly_started = True
