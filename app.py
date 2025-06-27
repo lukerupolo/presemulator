@@ -1,6 +1,6 @@
 import streamlit as st
 from pptx import Presentation
-from pptx.util import Pt
+from pptx.util import Pt, Inches
 import io
 import copy
 import uuid
@@ -11,20 +11,12 @@ from PIL import Image, ImageDraw, ImageFont
 # --- Core PowerPoint Functions ---
 
 def deep_copy_slide(dest_pres, src_slide):
-    """
-    Deep copies a slide from a source presentation to a destination presentation
-    by adding a new slide and then copying the shapes. This is the most stable method.
-    """
-    # Use a blank layout as a base for the new slide
-    blank_layout = dest_pres.slide_layouts[6] 
-    dest_slide = dest_pres.slides.add_slide(blank_layout)
-
-    # Clear any default shapes from the blank layout
+    """Deep copies a slide from source to destination presentation."""
+    dest_layout = dest_pres.slide_layouts[6] 
+    dest_slide = dest_pres.slides.add_slide(dest_layout)
     for shape in list(dest_slide.shapes):
         sp = shape.element
         sp.getparent().remove(sp)
-
-    # Copy shapes from the source slide to the destination slide
     for shape in src_slide.shapes:
         new_el = copy.deepcopy(shape.element)
         dest_slide.shapes._spTree.insert_element_before(new_el, 'p:extLst')
@@ -81,18 +73,39 @@ def populate_slide(slide, content):
     if body_shape:
         tf = body_shape.text_frame; tf.clear(); run = tf.add_paragraph().add_run(); run.text = content.get("body", ""); run.font.bold = True
 
-def get_slide_thumbnail(slide, index):
-    """Creates a basic placeholder thumbnail image for a slide."""
-    title = get_slide_content(slide).get("title", f"Slide {index + 1}")
-    title_text = f"PREVIEW: SLIDE {index + 1}\n\n{title[:80]}"
+def get_slide_thumbnail(slide, index, slide_width, slide_height):
+    """Creates a much-improved 'text layout' thumbnail of a slide."""
+    THUMB_WIDTH = 400
+    THUMB_HEIGHT = int(THUMB_WIDTH * (slide_height / slide_width))
+    
+    img = Image.new('RGB', (THUMB_WIDTH, THUMB_HEIGHT), color = '#FFFFFF')
+    draw = ImageDraw.Draw(img)
+    
     try:
-        font = ImageFont.truetype("Arial.ttf", 15)
+        font = ImageFont.truetype("Arial.ttf", 10)
     except IOError:
         font = ImageFont.load_default()
-    
-    img = Image.new('RGB', (400, 300), color = '#F0F2F6')
-    draw = ImageDraw.Draw(img)
-    draw.text((10, 10), title_text, fill=(0,0,0), font=font)
+
+    # Draw a border
+    draw.rectangle([0, 0, THUMB_WIDTH - 1, THUMB_HEIGHT - 1], outline="black")
+
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        
+        # Calculate proportional position and size
+        x = int((shape.left / slide_width) * THUMB_WIDTH)
+        y = int((shape.top / slide_height) * THUMB_HEIGHT)
+        w = int((shape.width / slide_width) * THUMB_WIDTH)
+        h = int((shape.height / slide_height) * THUMB_HEIGHT)
+
+        # Draw a light grey box representing the shape
+        draw.rectangle([x, y, x + w, y + h], fill="#F0F2F6", outline="#D3D3D3")
+        
+        # Draw the text inside the box
+        text = shape.text[:200] + "..." if len(shape.text) > 200 else shape.text
+        draw.text((x + 5, y + 5), text, fill=(0,0,0), font=font)
+        
     return img
 
 # --- Streamlit App ---
@@ -125,9 +138,9 @@ with st.sidebar:
 if template_files and gtm_file and api_key and st.session_state.structure:
     if st.button("1. Generate Build Plan", type="primary"):
         with st.spinner("Analyzing decks and creating initial plan..."):
-            template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
+            template_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
             gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
-            template_content = [{"slide_index": i, "text": " ".join(s.text for s in slide.shapes if s.has_text_frame)[:1000]} for i, slide in enumerate(template_prs_list[0].slides)]
+            template_content = [{"slide_index": i, "text": " ".join(s.text for s in slide.shapes if s.has_text_frame)[:1000]} for i, slide in enumerate(template_prs.slides)]
             gtm_content = [{"slide_index": i, "text": " ".join(s.text for s in slide.shapes if s.has_text_frame)[:1000]} for i, slide in enumerate(gtm_prs.slides)]
             plan = []
             for step in st.session_state.structure:
@@ -137,12 +150,12 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                     result = find_slide_candidates_by_ai(api_key, gtm_prs, keyword, gtm_content)
                     if result: item["gtm_choice"] = result[0]
                 elif action == "Merge: Template Layout + GTM Content":
-                    item["template_choices"] = find_slide_candidates_by_ai(api_key, template_prs_list[0], keyword, template_content)
+                    item["template_choices"] = find_slide_candidates_by_ai(api_key, template_prs, keyword, template_content)
                     content_result = find_slide_candidates_by_ai(api_key, gtm_prs, keyword, gtm_content)
                     if content_result: item["gtm_choice"] = content_result[0]
                 plan.append(item)
             st.session_state.build_plan = plan
-            st.session_state.template_prs = template_prs_list[0]
+            st.session_state.template_prs = template_prs
             st.session_state.gtm_prs = gtm_prs
 
 if st.session_state.build_plan:
@@ -153,29 +166,27 @@ if st.session_state.build_plan:
             if item['action'] == "Merge: Template Layout + GTM Content":
                 st.write("**Select a Layout from the Template Deck:**")
                 if item["template_choices"]:
-                    # Create radio button options
-                    options = [f"Option {j+1}: Slide {choice['index']+1}" for j, choice in enumerate(item["template_choices"])]
+                    options = [f"Option {j+1} (Slide {choice['index']+1})" for j, choice in enumerate(item["template_choices"])]
                     selection_index = st.radio("Layout Options", range(len(options)), format_func=lambda x: options[x], key=f"select_{item['keyword']}", horizontal=True)
                     item['user_selection'] = selection_index
                     
-                    # Display the selected choice and its justification
-                    selected_choice = item["template_choices"][selection_index]
-                    st.image(get_slide_thumbnail(selected_choice['slide'], selected_choice['index']), caption=f"Selected Layout: Slide {selected_choice['index']+1}")
-                    st.info(f"AI Justification: {selected_choice['justification']}")
+                    cols = st.columns(len(item["template_choices"]))
+                    for j, choice in enumerate(item["template_choices"]):
+                        with cols[j]:
+                            st.image(get_slide_thumbnail(choice['slide'], choice['index'], st.session_state.template_prs.slide_width, st.session_state.template_prs.slide_height), use_column_width=True)
+                            st.info(f"AI says: {choice['justification']}")
                 else:
                     st.warning("AI found no suitable layouts in the Template Deck.")
             
             if item['gtm_choice'] and item['gtm_choice']['slide']:
                  st.write("**Content Source from GTM Deck:**")
-                 st.image(get_slide_thumbnail(item['gtm_choice']['slide'], item['gtm_choice']['index']), caption=f"Content from GTM Slide {item['gtm_choice']['index']+1}")
+                 st.image(get_slide_thumbnail(item['gtm_choice']['slide'], item['gtm_choice']['index'], st.session_state.gtm_prs.slide_width, st.session_state.gtm_prs.slide_height))
                  st.info(f"AI Justification: {item['gtm_choice']['justification']}")
 
     st.markdown("---")
     if st.button("2. Assemble Final Presentation", type="primary"):
         with st.spinner("Executing final assembly..."):
-            final_prs = Presentation()
-            final_prs.slide_width = st.session_state.template_prs.slide_width
-            final_prs.slide_height = st.session_state.template_prs.slide_height
+            final_prs = Presentation(); final_prs.slide_width = st.session_state.template_prs.slide_width; final_prs.slide_height = st.session_state.template_prs.slide_height
             for item in st.session_state.build_plan:
                 if item['action'] == "Copy from GTM (as is)":
                     if item['gtm_choice'] and item['gtm_choice']['slide']:
@@ -186,9 +197,6 @@ if st.session_state.build_plan:
                         content = get_slide_content(item['gtm_choice']['slide'])
                         new_slide = final_prs.slides.add_slide(selected_layout_slide.slide_layout)
                         populate_slide(new_slide, content)
-            
             output_buffer = io.BytesIO(); final_prs.save(output_buffer); output_buffer.seek(0)
-            st.success("🎉 Your new presentation has been assembled!")
-            st.download_button("Download Assembled PowerPoint", data=output_buffer, file_name="Interactive_AI_Assembled_Deck.pptx")
+            st.success("🎉 Your presentation has been assembled!"); st.download_button("Download Assembled PowerPoint", data=output_buffer, file_name="Interactive_AI_Assembled_Deck.pptx")
             st.session_state.build_plan = None
-
