@@ -12,27 +12,39 @@ st.set_page_config(page_title="AI PPTX Style Extractor")
 st.title("AI PPTX Style Extractor")
 api_key = st.sidebar.text_input("OpenAI API Key", type="password")
 if not api_key:
-    st.sidebar.warning("Enter your OpenAI API key")
+    st.sidebar.warning("Enter your OpenAI API key to proceed.")
     st.stop()
 openai.api_key = api_key
 
 # --- Helper functions ---
 def sanitize_code(code: str) -> str:
     """
-    Strip markdown fences and narrative prefixes from the AI-generated code.
+    Remove any backtick lines and narrative prefixes to produce clean Python.
     """
     lines = code.splitlines()
-    # Remove markdown fences
-    if lines and lines[0].startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].startswith("```"):
-        lines = lines[:-1]
-    # Remove narrative lines before actual Python code
-    for i, line in enumerate(lines):
-        if line.startswith("import ") or line.startswith("from ") or line.startswith("def "):
-            lines = lines[i:]
-            break
-    return "\n".join(lines)
+    clean = []
+    for line in lines:
+        # Skip markdown fences or any line of backticks
+        if line.strip().startswith('```'):
+            continue
+        # Skip narrative commentary lines
+        if not (line.strip().startswith('import') or
+                line.strip().startswith('from') or
+                line.strip().startswith('def') or
+                line.strip().startswith('prs') or
+                line.strip().startswith('slide') or
+                line.strip().startswith('#')):
+            # allow code blocks starting with these python keywords
+            # else assume narrative, skip
+            words = line.strip().split()
+            if words and words[0].endswith(':'):
+                # leave function/class definitions
+                clean.append(line)
+            else:
+                continue
+        else:
+            clean.append(line)
+    return '\n'.join(clean)
 
 
 def parse_pptx(path: str) -> dict:
@@ -94,14 +106,11 @@ def call_openai_to_generate_code(slides_json: dict) -> str:
 
 
 def run_generated_code(code: str) -> str:
-    """
-    Clean, run the generated script, and return the rebuilt PPTX's path.
-    """
-    code_clean = sanitize_code(code)
+    clean = sanitize_code(code)
     with tempfile.TemporaryDirectory() as tmp:
         script = os.path.join(tmp, 'gen.py')
         with open(script, 'w') as f:
-            f.write(code_clean)
+            f.write(clean)
         try:
             result = subprocess.run(
                 ['python', script], cwd=tmp,
@@ -115,9 +124,9 @@ def run_generated_code(code: str) -> str:
         if not os.path.exists(out):
             st.error("Expected 'recreated.pptx' not found.")
             raise FileNotFoundError(out)
-        final = tempfile.mktemp(suffix='.pptx')
-        shutil.copy(out, final)
-        return final
+        dest = tempfile.mktemp(suffix='.pptx')
+        shutil.copy(out, dest)
+        return dest
 
 # --- Main UI ---
 uploaded = st.file_uploader('Upload PPTX or PDF', type=['pptx', 'pdf'])
@@ -147,11 +156,11 @@ if uploaded:
                 st.stop()
         with st.spinner('Reconstructing slides...'):
             try:
-                out_file = run_generated_code(code)
+                out_path = run_generated_code(code)
             except Exception:
                 st.stop()
         st.success('Done! Download below:')
-        data = open(out_file, 'rb').read()
+        data = open(out_path, 'rb').read()
         st.download_button(
             'Download PPTX', data=data,
             file_name='recreated.pptx',
