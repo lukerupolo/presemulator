@@ -66,7 +66,15 @@ def find_slide_by_ai(api_key, prs, slide_type_prompt):
 
 def get_slide_content(slide):
     """Extracts title and body text from a slide."""
-    text_boxes = sorted([s for s in slide.shapes if s.has_text_frame and s.text.strip()], key=lambda s: s.top)
+    # FIX: Check if slide object is valid before proceeding
+    if slide is None:
+        return {"title": "", "body": ""}
+        
+    # FIX: Add check for s.text being None before calling .strip()
+    text_boxes = sorted(
+        [s for s in slide.shapes if s.has_text_frame and s.text and s.text.strip()],
+        key=lambda s: s.top
+    )
     title = text_boxes[0].text if text_boxes else ""
     body = "\n".join(s.text for s in text_boxes[1:]) if len(text_boxes) > 1 else ""
     return {"title": title, "body": body}
@@ -104,7 +112,6 @@ with st.sidebar:
     api_key = st.text_input("OpenAI API Key", type="password")
     st.markdown("---")
     st.header("2. Upload Decks")
-    # FIX: Re-enabled multiple file uploads for templates
     template_files = st.file_uploader("Upload Template Deck(s)", type=["pptx"], accept_multiple_files=True)
     gtm_file = st.file_uploader("Upload GTM Global Deck", type=["pptx"])
     st.markdown("---")
@@ -131,10 +138,9 @@ with st.sidebar:
 # --- Main App Logic ---
 if template_files and gtm_file and api_key and st.session_state.structure:
     if st.button("🚀 Assemble Presentation", type="primary"):
-        with st.spinner("Assembling your new presentation... This may take a moment."):
+        with st.spinner("Assembling your new presentation..."):
             try:
                 st.write("Step 1/3: Loading decks...")
-                # FIX: Use the first template as the base, but load all templates for searching
                 new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
                 gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
                 template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
@@ -153,6 +159,7 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                     
                     if action == "Copy from GTM (as is)":
                         result = find_slide_by_ai(api_key, gtm_prs, keyword)
+                        # FIX: Check if the AI returned a valid slide object
                         if result and result["slide"]:
                             build_plan.append({"action": "copy", "dest_slide": dest_slide, "src_slide": result["slide"], "keyword": keyword})
                         else:
@@ -160,19 +167,21 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                     
                     elif action == "Merge: Template Layout + GTM Content":
                         layout_slide = None
-                        # FIX: Search through all uploaded templates for the layout
                         for template_prs in template_prs_list:
-                            layout_slide = find_slide_by_ai(api_key, template_prs, keyword)
-                            if layout_slide:
+                            layout_result = find_slide_by_ai(api_key, template_prs, keyword)
+                            if layout_result and layout_result["slide"]:
+                                layout_slide = layout_result["slide"]
                                 break
                         
-                        content_slide = find_slide_by_ai(api_key, gtm_prs, keyword)
-                        if layout_slide and content_slide:
-                            content = get_slide_content(content_slide)
+                        content_result = find_slide_by_ai(api_key, gtm_prs, keyword)
+                        
+                        # FIX: Check if both layout and content slides were found
+                        if layout_slide and content_result and content_result["slide"]:
+                            content = get_slide_content(content_result["slide"])
                             build_plan.append({"action": "merge", "dest_slide": dest_slide, "content": content, "keyword": keyword})
                         else:
                             if not layout_slide: st.warning(f"AI could not find layout for '{keyword}' in any Template. Leaving template slide {i+1} as is.")
-                            if not content_slide: st.warning(f"AI could not find content for '{keyword}' in GTM Deck. Leaving template slide {i+1} as is.")
+                            if not (content_result and content_result["slide"]): st.warning(f"AI could not find content for '{keyword}' in GTM Deck. Leaving template slide {i+1} as is.")
                 
                 # Execute the build plan
                 for item in build_plan:
