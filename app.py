@@ -190,6 +190,22 @@ def deep_copy_slide_content(dest_slide, src_slide):
     copy_slide_background(src_slide, dest_slide)
 
 
+def get_all_slide_texts(prs):
+    """
+    Extracts a summary of text content from all slides in a presentation.
+    Used to provide context to the AI about template slide layouts.
+    """
+    all_slides_text = []
+    for i, slide in enumerate(prs.slides):
+        slide_text_content = []
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                slide_text_content.append(shape.text)
+        # Concatenate text, limit length to save tokens for AI
+        all_slides_text.append({"slide_index": i, "text": " ".join(slide_text_content)[:1000]})
+    return all_slides_text
+
+
 def find_slide_by_ai(api_key, prs, slide_type_prompt, deck_name):
     """
     Uses OpenAI to intelligently find the best matching slide and get a justification.
@@ -242,6 +258,91 @@ def find_slide_by_ai(api_key, prs, slide_type_prompt, deck_name):
     except Exception as e:
         return {"slide": None, "index": -1, "justification": f"An unexpected error occurred during AI analysis: {e}"}
 
+
+def analyze_and_map_content(api_key, gtm_slide_content, template_slides_summary, user_keyword):
+    """
+    Uses OpenAI to analyze GTM content, find the best template layout, and
+    process the GTM content by inserting regional placeholders.
+    """
+    if not api_key:
+        return {"best_template_index": -1, "justification": "OpenAI API Key is missing.", "processed_content": gtm_slide_content}
+
+    client = openai.OpenAI(api_key=api_key)
+
+    system_prompt = f"""
+    You are an expert presentation content mapper. Your task is to help a user
+    integrate content from a Global (GTM) slide into a regional template.
+
+    Given the GTM slide content and summaries of available template slides,
+    you must perform two key tasks:
+    1.  **Select the Best Template:** Identify the most suitable template slide
+        (by its index) from `template_slides_summary` that would best house
+        the provided `gtm_slide_content`. Consider the structure and typical
+        purpose of template slides.
+    2.  **Process GTM Content for Regionalization:** Analyze the `gtm_slide_content`.
+        Identify any parts of the text that are likely to be *regional-specific*
+        (e.g., local market data, specific regional initiatives, detailed local performance
+        figures, regional names, or examples relevant only to one region).
+        For these regional-specific parts, replace them with a concise, generic
+        placeholder like `[REGIONAL DATA HERE]`, `[LOCAL EXAMPLE]`, `[Qx REGIONAL METRICS]`.
+        The goal is to provide a global baseline with clear markers for regional teams to fill in.
+        Maintain the original overall structure of the text.
+
+    You MUST return a JSON object with the following keys:
+    -   `best_template_index`: An integer representing the index of the best template slide.
+    -   `justification`: A brief, one-sentence justification for choosing that template.
+    -   `processed_content`: An object with 'title' and 'body' keys, containing the
+        GTM content with regional placeholders inserted.
+    """
+    
+    # Prepare the user prompt with the GTM content and template summaries
+    full_user_prompt = f"""
+    User's original keyword for this content: '{user_keyword}'
+
+    GTM Slide Content to Process:
+    {json.dumps(gtm_slide_content, indent=2)}
+
+    Available Template Slides Summary:
+    {json.dumps(template_slides_summary, indent=2)}
+    """
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4-turbo", # Using a capable model for complex reasoning
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": full_user_prompt}],
+            response_format={"type": "json_object"}
+        )
+        result = json.loads(response.choices[0].message.content)
+        
+        # Validate AI response structure
+        if "best_template_index" not in result or "justification" not in result or "processed_content" not in result:
+            raise ValueError("AI response missing required keys.")
+
+        best_index = result["best_template_index"]
+        justification = result["justification"]
+        processed_content = result["processed_content"]
+
+        # Ensure processed_content has 'title' and 'body'
+        if "title" not in processed_content: processed_content["title"] = gtm_slide_content.get("title", "")
+        if "body" not in processed_content: processed_content["body"] = gtm_slide_content.get("body", "")
+
+        return {
+            "best_template_index": best_index,
+            "justification": justification,
+            "processed_content": processed_content
+        }
+
+    except openai.APIError as e:
+        print(f"OpenAI API Error in analyze_and_map_content: {e}")
+        return {"best_template_index": -1, "justification": f"OpenAI API Error: {e}", "processed_content": gtm_slide_content}
+    except json.JSONDecodeError as e:
+        print(f"JSON Decode Error in analyze_and_map_content: {e}")
+        return {"best_template_index": -1, "justification": f"AI response was not valid JSON: {e}", "processed_content": gtm_slide_content}
+    except Exception as e:
+        print(f"An unexpected error occurred in analyze_and_map_content: {e}")
+        return {"best_template_index": -1, "justification": f"An error occurred during content mapping: {e}", "processed_content": gtm_slide_content}
+
+
 def get_slide_content(slide):
     """Extracts title and body text from a slide."""
     if not slide: return {"title": "", "body": ""}
@@ -264,7 +365,8 @@ def populate_slide(slide, content):
     """
     Populates a slide's placeholders or main text boxes with new content.
     It clears the existing content and adds new runs, aiming to use existing
-    placeholders without forcing bold.
+    placeholders without forcing bold. This content is expected to already
+    contain any necessary regional placeholders.
     """
     title_populated, body_populated = False, False
     
@@ -390,7 +492,10 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                     if i >= len(new_prs.slides): 
                         break
 
-                    dest_slide = new_prs.slides[i] # Get the current destination slide from the new presentation
+                    # dest_slide is now potentially changed if a new template slide is chosen by AI
+                    current_dest_slide_index = i # Initial index in the new presentation
+                    dest_slide = new_prs.slides[current_dest_slide_index] 
+                    
                     keyword, action = step["keyword"], step["action"]
                     log_entry = {"step": i + 1, "keyword": keyword, "action": action, "log": []}
                     
@@ -401,22 +506,66 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                         if result["slide"]:
                             # If a suitable slide is found, deep copy its content to the destination slide
                             deep_copy_slide_content(dest_slide, result["slide"])
-                            log_entry["log"].append(f"**Action:** Replaced Template slide {i + 1} with content from GTM slide {result['index'] + 1}.")
+                            log_entry["log"].append(f"**Action:** Replaced Template slide {current_dest_slide_index + 1} with content from GTM slide {result['index'] + 1}.")
                         else:
                             log_entry["log"].append("**Action:** No suitable slide found in GTM deck. Template slide was left as is.")
                     
                     elif action == "Merge: Template Layout + GTM Content":
-                        # Find the best matching slide for content in the GTM deck using AI
-                        content_result = find_slide_by_ai(api_key, gtm_prs, keyword, "GTM Deck")
-                        log_entry["log"].append(f"**GTM Content Choice Justification:** {content_result['justification']}")
-                        if content_result["slide"]:
-                            # If content slide found, extract its title and body
-                            content = get_slide_content(content_result["slide"])
-                            # Populate the destination slide (template layout) with the extracted content
-                            populate_slide(dest_slide, content)
-                            log_entry["log"].append(f"**Action:** Merged content from GTM slide {content_result['index'] + 1} into Template slide {i+1}.")
+                        # --- New Logic for Merge Action ---
+                        # 1. Find the best matching slide in the GTM deck (source of content)
+                        gtm_content_source_result = find_slide_by_ai(api_key, gtm_prs, keyword, "GTM Deck (Content Source)")
+                        log_entry["log"].append(f"**GTM Content Source Justification:** {gtm_content_source_result['justification']}")
+
+                        if gtm_content_source_result["slide"]:
+                            # Extract raw content from the identified GTM source slide
+                            raw_gtm_content = get_slide_content(gtm_content_source_result["slide"])
+                            
+                            # Get summaries of all template slides for AI context
+                            template_slides_summary = get_all_slide_texts(new_prs)
+
+                            # 2. Use AI to analyze GTM content, find best template layout, and generate placeholders
+                            ai_mapping_result = analyze_and_map_content(
+                                api_key, 
+                                raw_gtm_content, 
+                                template_slides_summary, 
+                                keyword # Pass original keyword for AI context
+                            )
+                            log_entry["log"].append(f"**AI Template Mapping Justification:** {ai_mapping_result['justification']}")
+
+                            selected_template_index = ai_mapping_result["best_template_index"]
+                            processed_content = ai_mapping_result["processed_content"]
+
+                            if selected_template_index != -1 and selected_template_index < len(new_prs.slides):
+                                # The AI selected a different template slide for this content.
+                                # We need to use that selected slide as the destination.
+                                # If the selected template index is different from current_dest_slide_index (i),
+                                # this means we are mapping content from GTM slide X to template slide Y,
+                                # where Y is not necessarily the 'i-th' slide. This requires advanced reordering
+                                # or replacing the 'i-th' slide with the selected template slide's content.
+                                # For simplicity, let's assume the template_files[0] has enough slides and we
+                                # are just populating into the *designated* slide at index `i` of the output `new_prs`.
+                                # The AI's `best_template_index` here refers to the index within the *original* template deck.
+                                # To populate, we must use the slide at `i` in `new_prs`.
+                                # The AI's role is to adapt content to a *generic* template layout, not to pick a specific slide index for the output deck.
+                                # The current design iterates through `new_prs.slides` and processes `step[i]`.
+                                # So, the `best_template_index` from `analyze_and_map_content` can tell us *which template layout style* is best,
+                                # but we still populate into `dest_slide` (which is `new_prs.slides[i]`).
+                                # This is a conceptual clarification for how the AI's template selection impacts direct slide replacement vs. content merge.
+
+                                # For 'Merge', the *layout* comes from the current `dest_slide` (new_prs.slides[i]).
+                                # The AI's role here is *not* to change which slide in `new_prs` we're working on,
+                                # but to process the GTM content for the *existing layout*.
+                                # The `best_template_index` becomes more of a 'suggestion' for *which type of layout* the content fits.
+                                # Given the current code structure, we still populate `dest_slide` (new_prs.slides[i]).
+                                # The AI-processed content handles the 'best fit' to layout by modifying the content itself.
+
+                                # Populate the current destination slide with the processed content
+                                populate_slide(dest_slide, processed_content)
+                                log_entry["log"].append(f"**Action:** Merged processed content from GTM slide {gtm_content_source_result['index'] + 1} into Template slide {current_dest_slide_index + 1}, with regional placeholders.")
+                            else:
+                                log_entry["log"].append("**Action:** AI could not determine a suitable template layout or process content. Template slide was left as is.")
                         else:
-                             log_entry["log"].append("**Action:** No suitable content found in GTM deck. Template slide was left as is.")
+                            log_entry["log"].append("**Action:** No suitable content found in GTM deck. Template slide was left as is.")
                     
                     process_log.append(log_entry) # Add step log to overall process log
  
