@@ -82,7 +82,6 @@ def preserve_and_set_text(text_frame, new_text):
         p.text = new_text
         return
 
-    # Store formatting from the first run of the first paragraph
     first_p = text_frame.paragraphs[0]
     font_name, font_size, font_bold, font_italic, font_color = None, Pt(18), None, None, None
     
@@ -94,15 +93,12 @@ def preserve_and_set_text(text_frame, new_text):
         font_italic = original_font.italic
         font_color = original_font.color
     
-    # Clear the entire text frame to remove old content
     text_frame.clear()
     
-    # Add new paragraph with the new text
     p = text_frame.add_paragraph()
     run = p.add_run()
     run.text = new_text
     
-    # Apply the preserved formatting
     font = run.font
     if font_name:
         font.name = font_name
@@ -119,7 +115,6 @@ def preserve_and_set_text(text_frame, new_text):
         elif hasattr(font_color, 'rgb'):
             font.color.rgb = font_color.rgb
 
-
 def update_presentation_with_new_text(prs, modified_slides):
     """Updates presentation with AI-modified text, preserving formatting."""
     if len(prs.slides) != len(modified_slides):
@@ -129,7 +124,6 @@ def update_presentation_with_new_text(prs, modified_slides):
     for i, slide in enumerate(prs.slides):
         slide_mods = modified_slides[i]
         
-        # Update Title
         for shape in slide.placeholders:
             if shape.placeholder_format.type.name == 'TITLE':
                 preserve_and_set_text(shape.text_frame, slide_mods.get('title', ''))
@@ -137,7 +131,30 @@ def update_presentation_with_new_text(prs, modified_slides):
             if shape.placeholder_format.type.name == 'BODY':
                  preserve_and_set_text(shape.text_frame, slide_mods.get('body', ''))
 
-# --- Streamlit UI ---
+# --- UI Functions ---
+
+def display_summary(original_data, modified_data):
+    """Displays a side-by-side comparison of changes."""
+    st.subheader("📝 Summary of Modifications")
+    st.write("Review the changes made by the AI below.")
+    
+    for original, modified in zip(original_data, modified_data):
+        st.markdown(f"---")
+        st.markdown(f"### Slide {original['slide_number']}")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Before**")
+            st.text_area("Title", value=original['title'], height=50, disabled=True, key=f"orig_title_{original['slide_number']}")
+            st.text_area("Body", value=original['body'], height=200, disabled=True, key=f"orig_body_{original['slide_number']}")
+
+        with col2:
+            st.markdown("**After**")
+            st.text_area("Title", value=modified['title'], height=50, disabled=True, key=f"mod_title_{modified['slide_number']}")
+            st.text_area("Body", value=modified['body'], height=200, disabled=True, key=f"mod_body_{modified['slide_number']}")
+
+# --- Streamlit App ---
 
 st.set_page_config(page_title="AI PowerPoint Editor", layout="wide")
 st.title("🤖 AI-Powered PowerPoint Content Editor")
@@ -187,6 +204,10 @@ if uploaded_file is not None:
                         new_filename = f"{base}_ai_modified.pptx"
 
                         st.success("🎉 Your presentation has been successfully modified!")
+                        
+                        # --- NEW: Display the summary of changes ---
+                        display_summary(original_data, modified_data)
+
                         st.download_button(
                             label="Download Modified PowerPoint",
                             data=output_buffer,
