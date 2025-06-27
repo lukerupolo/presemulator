@@ -21,25 +21,44 @@ def parse_pptx(path: str) -> dict:
     prs = Presentation(path)
     slides = []
     for slide in prs.slides:
-        layout = slide.slide_layout.name
+        layout = slide.slide_layout.name if slide.slide_layout else "Custom"
         bg = slide.background.fill
         bg_color = None
-        if bg.type == 1:
+        if bg and bg.type == 1:
             rgb = bg.fore_color.rgb
             bg_color = f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
         elements = []
         for shape in slide.shapes:
-            if not shape.has_text_frame:
+            if not hasattr(shape, 'text_frame') or not shape.text_frame:
                 continue
-            font = shape.text_frame.paragraphs[0].runs[0].font
+            # Extract full text safely
+            full_text = ''
+            for paragraph in shape.text_frame.paragraphs:
+                for run in paragraph.runs:
+                    full_text += run.text
+            # Font from first run if exists
+            font_info = {'name': None, 'size': None, 'bold': False, 'italic': False}
+            if shape.text_frame.paragraphs:
+                first_para = shape.text_frame.paragraphs[0]
+                if first_para.runs:
+                    font = first_para.runs[0].font
+                    font_info = {
+                        'name': font.name,
+                        'size': font.size.pt if font.size else None,
+                        'bold': bool(font.bold),
+                        'italic': bool(font.italic)
+                    }
             elements.append({
-                "text": shape.text,
-                "font": {"name": font.name, "size": font.size.pt if font.size else None,
-                          "bold": bool(font.bold), "italic": bool(font.italic)},
+                "text": full_text,
+                "font": font_info,
                 "position": {"x": shape.left.pt, "y": shape.top.pt,
                              "w": shape.width.pt, "h": shape.height.pt}
             })
-        slides.append({"layout": layout, "background_color": bg_color, "elements": elements})
+        slides.append({
+            "layout": layout,
+            "background_color": bg_color,
+            "elements": elements
+        })
     return {"slides": slides}
 
 
