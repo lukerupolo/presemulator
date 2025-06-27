@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 from pptx import Presentation
 from pptx.util import Pt
@@ -10,12 +9,12 @@ import copy
 import uuid
 import openai
 import json
-import requests # NEW: For making HTTP requests to the conversion service
-import os # NEW: For os.getenv
+import requests # For making HTTP requests to the conversion service
+import os # For os.getenv
 
 # --- Configuration for the Conversion Service ---
-# IMPORTANT: Change this URL to where your conversion_service.py is running.
-# If running locally, it's typically http://127.0.0.1:8000 or http://localhost:8000
+# IMPORTANT: This URL will be provided via an environment variable in your deployment.
+# For local testing, it defaults to localhost.
 CONVERSION_SERVICE_URL = os.getenv("CONVERSION_SERVICE_URL", "http://localhost:8000/convert_document")
 
 # --- Helper Function for Copying Background (PPTX-specific) ---
@@ -262,7 +261,7 @@ def analyze_and_map_content(api_key, gtm_slide_content_data, template_slides_dat
     1.  **Select the BEST Template:**
         * **Crucially, you must review *each and every* template slide/page text summary AND its associated visual content.**
         * Semantically and **visually** evaluate which template slide's structure and implied purpose would *best* accommodate the `gtm_slide_content`.
-        * **Perform a comparative analysis:** Do not just pick the first decent match. Compare all options to find the single most suitable template based on a combined understanding of text and visuals. **Prioritize templates where the text *imlies* a strong visual match, rather than just explicitly stating a type.** For instance, a template with short, sequential bullet points and dates might be a better visual timeline fit than one that simply has "Timeline" in its title but dense paragraphs.
+        * **Perform a comparative analysis:** Do not just pick the first decent match. Compare all options to find the single most suitable template based on a combined understanding of text and visuals. **Prioritize templates where the text *implies* a strong visual match, rather than just explicitly stating a type.** For instance, a template with short, sequential bullet points and dates might be a better visual timeline fit than one that simply has "Timeline" in its title but dense paragraphs.
         * Consider factors like:
             * Does the template's textual layout (e.g., presence of sections, bullet points, titles) **and its visual layout (e.g., number of content blocks, placement of image placeholders, overall design)** match the theme/type of the GTM content.
             * Is there sufficient space or logical sections in the template for the GTM content based on its textual and visual structure?
@@ -621,3 +620,4 @@ if template_files and gtm_files and api_key and st.session_state.structure:
                 st.exception(e)
 else:
     st.info("Please provide an API Key, upload at least one Template Deck (PPTX or PDF) and a GTM Global Deck (PPTX or PDF), and define the structure in the sidebar to begin.")
+
