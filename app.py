@@ -29,15 +29,14 @@ def parse_pptx(path: str) -> dict:
             bg_color = f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
         elements = []
         for shape in slide.shapes:
-            if not hasattr(shape, 'text_frame') or not shape.text_frame:
+            tf = getattr(shape, 'text_frame', None)
+            if not tf:
                 continue
-            full_text = ''
-            for paragraph in shape.text_frame.paragraphs:
-                for run in paragraph.runs:
-                    full_text += run.text
+            full_text = ''.join(run.text for p in tf.paragraphs for run in p.runs)
             font_info = {'name': None, 'size': None, 'bold': False, 'italic': False}
-            if shape.text_frame.paragraphs and shape.text_frame.paragraphs[0].runs:
-                font = shape.text_frame.paragraphs[0].runs[0].font
+            first_run = tf.paragraphs[0].runs[0] if tf.paragraphs and tf.paragraphs[0].runs else None
+            if first_run:
+                font = first_run.font
                 font_info = {
                     'name': font.name,
                     'size': font.size.pt if font.size else None,
@@ -65,7 +64,6 @@ def convert_pdf_to_pptx(pdf_path: str) -> str:
 
 
 def call_openai_to_generate_code(slides_json: dict) -> str:
-    # Use a valid model name
     system = (
         "You are a code generator. Given JSON describing slides, produce Python code using python-pptx"
         " that recreates each slide with fonts, positions, and colors."
@@ -82,15 +80,32 @@ def call_openai_to_generate_code(slides_json: dict) -> str:
 
 
 def run_generated_code(code: str) -> str:
+    """
+    Write the generated code to a temp script, run it, and return path to recreated.pptx.
+    Captures and surfaces errors from execution.
+    """
     with tempfile.TemporaryDirectory() as tmp:
-        script_path = os.path.join(tmp, 'gen.py')
-        with open(script_path, 'w') as f:
+        script = os.path.join(tmp, 'gen.py')
+        with open(script, 'w') as f:
             f.write(code)
-        subprocess.run(['python', script_path], cwd=tmp, check=True)
+        try:
+            # Capture stdout/stderr
+            result = subprocess.run(
+                ['python', script], cwd=tmp,
+                capture_output=True, text=True, check=True
+            )
+        except subprocess.CalledProcessError as e:
+            # Show error logs in Streamlit
+            st.error("Error executing generated code:")
+            st.code(e.stderr)
+            raise
         out_path = os.path.join(tmp, 'recreated.pptx')
-        final_path = tempfile.mktemp(suffix='.pptx')
-        shutil.copy(out_path, final_path)
-        return final_path
+        if not os.path.exists(out_path):
+            st.error("Expected output 'recreated.pptx' not found.")
+            raise FileNotFoundError(out_path)
+        final = tempfile.mktemp(suffix='.pptx')
+        shutil.copy(out_path, final)
+        return final
 
 # --- Main UI ---
 uploaded = st.file_uploader("Upload PPTX or PDF", type=["pptx", "pdf"])
@@ -121,14 +136,12 @@ if uploaded:
         with st.spinner("Reconstructing slides..."):
             try:
                 out_file = run_generated_code(code)
-            except Exception as e:
-                st.error(f"Reconstruction failed: {e}")
+            except Exception:
                 st.stop()
         st.success("Done! Download below:")
-        with open(out_file, 'rb') as f:
-            data = f.read()
+        data = open(out_file, 'rb').read()
         st.download_button(
-            "Download PPTX",
+            "Download PPTX",Q
             data=data,
             file_name="recreated.pptx",
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
