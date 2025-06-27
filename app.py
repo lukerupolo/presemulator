@@ -9,13 +9,107 @@ import copy
 import uuid
 import openai
 import json
-import requests # For making HTTP requests to the conversion service
-import os # For os.getenv
+import requests
+import os
+import subprocess # NEW: For running git commands
+import tempfile   # NEW: For temporary directories
+import shutil     # NEW: For cleaning up directories
+import mimetypes  # NEW: For determining file types
 
 # --- Configuration for the Conversion Service ---
-# IMPORTANT: This URL will be provided via an environment variable in your deployment.
-# For local testing, it defaults to localhost.
 CONVERSION_SERVICE_URL = os.getenv("CONVERSION_SERVICE_URL", "http://localhost:8000/convert_document")
+# Get GitHub Token from environment variable
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+
+# --- Helper Function for Cloning and Downloading Files from GitHub ---
+@st.cache_data(show_spinner="Cloning GitHub repository and finding files...")
+def _download_files_from_github(repo_url: str, branch: str, file_paths_or_patterns: list[str]) -> list[tuple[bytes, str, str]]:
+    """
+    Clones a GitHub repository (using PAT if provided) and extracts file bytes.
+    Supports basic file paths and directory patterns.
+    Returns a list of (file_bytes, mime_type, file_name).
+    """
+    downloaded_files_data = []
+    
+    # Construct authenticated URL if token is available
+    if GITHUB_TOKEN:
+        parsed_url = repo_url.replace("https://github.com/", f"https://oauth2:{GITHUB_TOKEN}@github.com/")
+    else:
+        parsed_url = repo_url
+
+    temp_dir = None
+    try:
+        temp_dir = tempfile.mkdtemp()
+        repo_name = repo_url.split('/')[-1].replace(".git", "")
+        repo_path = os.path.join(temp_dir, repo_name)
+
+        # Clone the repository
+        st.info(f"Cloning '{repo_url}' (branch: {branch or 'default'})...")
+        clone_command = ["git", "clone", "--depth", "1"] # --depth 1 for shallow clone
+        if branch:
+            clone_command.extend(["--branch", branch])
+        clone_command.append(parsed_url)
+        clone_command.append(repo_path) # Clone into the named directory
+
+        result = subprocess.run(clone_command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            st.error(f"Failed to clone repository: {result.stderr}")
+            raise Exception(f"Git clone failed: {result.stderr}")
+        
+        st.info("Repository cloned. Searching for files...")
+
+        # Find and read files based on paths/patterns
+        for path_or_pattern in file_paths_or_patterns:
+            full_path = os.path.join(repo_path, path_or_pattern)
+            
+            if os.path.isdir(full_path):
+                # If it's a directory, walk through it
+                for root, _, files in os.walk(full_path):
+                    for file_name in files:
+                        file_abs_path = os.path.join(root, file_name)
+                        try:
+                            with open(file_abs_path, "rb") as f:
+                                file_bytes = f.read()
+                            mime_type, _ = mimetypes.guess_type(file_name)
+                            if not mime_type: # Fallback if guess_type fails
+                                if file_name.lower().endswith(".pptx"): mime_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                                elif file_name.lower().endswith(".pdf"): mime_type = "application/pdf"
+                                else: mime_type = "application/octet-stream" # Generic binary
+
+                            downloaded_files_data.append((file_bytes, mime_type, file_name))
+                            st.success(f"Found and loaded: {file_name} (Type: {mime_type})")
+                        except Exception as e:
+                            st.warning(f"Could not read file {file_name} in {root}: {e}")
+            elif os.path.isfile(full_path):
+                # If it's a single file
+                try:
+                    with open(full_path, "rb") as f:
+                        file_bytes = f.read()
+                    mime_type, _ = mimetypes.guess_type(full_path)
+                    if not mime_type: # Fallback
+                        if full_path.lower().endswith(".pptx"): mime_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                        elif full_path.lower().endswith(".pdf"): mime_type = "application/pdf"
+                        else: mime_type = "application/octet-stream"
+
+                    downloaded_files_data.append((file_bytes, mime_type, os.path.basename(full_path)))
+                    st.success(f"Found and loaded: {os.path.basename(full_path)} (Type: {mime_type})")
+                except Exception as e:
+                    st.warning(f"Could not read single file {full_path}: {e}")
+            else:
+                st.warning(f"Path not found or not a recognized file/directory: '{path_or_pattern}' in repo.")
+
+        if not downloaded_files_data:
+            st.error(f"No files found matching patterns {file_paths_or_patterns} in '{repo_url}'.")
+
+    except Exception as e:
+        st.error(f"An error occurred during GitHub operation: {e}")
+        return []
+    finally:
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir) # Clean up the temporary directory
+
+    return downloaded_files_data
+
 
 # --- Helper Function for Copying Background (PPTX-specific) ---
 def copy_slide_background(src_slide, dest_slide):
@@ -35,7 +129,6 @@ def copy_slide_background(src_slide, dest_slide):
     src_blip_fill = src_bg_pr.find('.//a:blipFill', namespaces=src_slide_elm.nsmap)
     
     if src_blip_fill is not None:
-        # Corrected namespace usage for a:blip
         src_blip = src_blip_fill.find('.//a:blip', namespaces=src_blip_fill.nsmap)
         if src_blip is not None and '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed' in src_blip.attrib:
             rId = src_blip.attrib['{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed']
@@ -409,9 +502,23 @@ with st.sidebar:
     st.header("1. API Key & Decks")
     api_key = st.text_input("OpenAI API Key", type="password")
     st.markdown("---")
-    st.header("2. Upload Decks")
-    template_files = st.file_uploader("Upload Template Deck(s) (PPTX or PDF)", type=["pptx", "pdf"], accept_multiple_files=True)
-    gtm_files = st.file_uploader("Upload GTM Global Deck(s) (PPTX or PDF)", type=["pptx", "pdf"], accept_multiple_files=True)
+    st.header("2. Input Documents from GitHub")
+    st.info("Files will be pulled from the specified GitHub repository.")
+    github_repo_url = st.text_input("GitHub Repository URL (e.g., https://github.com/org/repo-name.git)")
+    github_branch = st.text_input("GitHub Branch (optional, default: main)", value="main")
+    
+    st.subheader("Template Documents Paths")
+    template_paths_raw = st.text_area(
+        "Comma-separated paths/folders for Template Deck(s) within repo (e.g., templates/part1.pptx, templates/part2/, templates/cover.pdf)",
+        key="template_paths_raw"
+    )
+    
+    st.subheader("GTM Global Document Path")
+    gtm_paths_raw = st.text_area(
+        "Comma-separated paths/folders for GTM Global Deck(s) within repo (e.g., gtm/global.pptx, gtm/report.pdf)",
+        key="gtm_paths_raw"
+    )
+
     st.markdown("---")
     st.header("3. Define Presentation Structure")
     
@@ -440,62 +547,71 @@ with st.sidebar:
         st.rerun()
 
 # --- Main App Logic ---
-if template_files and gtm_files and api_key and st.session_state.structure:
-    if not gtm_files: 
-        st.error("Please upload at least one file to the 'GTM Global Deck(s)' section.")
-        st.stop()
+if github_repo_url and template_paths_raw and gtm_paths_raw and api_key and st.session_state.structure:
+    template_paths = [p.strip() for p in template_paths_raw.split(',') if p.strip()]
+    gtm_paths = [p.strip() for p in gtm_paths_raw.split(',') if p.strip()]
 
-    gtm_file_to_process = gtm_files[0]
-    if len(gtm_files) > 1:
-        st.warning("Multiple GTM files uploaded. Only the first file will be processed.")
+    if not template_paths:
+        st.error("Please provide at least one path for Template Deck(s).")
+        st.stop()
+    if not gtm_paths:
+        st.error("Please provide at least one path for GTM Global Deck(s).")
+        st.stop()
 
     if st.button("🚀 Assemble Presentation", type="primary"):
         with st.spinner("Assembling your new presentation..."):
             try:
-                st.write("Step 1/3: Loading decks...")
+                st.write("Step 1/3: Pulling documents from GitHub...")
                 
-                base_pptx_template_bytes = None
-                initial_pptx_loaded = False
-                new_prs = None 
+                all_template_downloaded_files = _download_files_from_github(github_repo_url, github_branch, template_paths)
+                all_gtm_downloaded_files = _download_files_from_github(github_repo_url, github_branch, gtm_paths)
 
+                if not all_template_downloaded_files:
+                    st.error("No template files found or downloaded from GitHub.")
+                    st.stop()
+                if not all_gtm_downloaded_files:
+                    st.error("No GTM files found or downloaded from GitHub.")
+                    st.stop()
+                
+                # For GTM, we process only the first found file for now
+                gtm_file_to_process_bytes, gtm_file_to_process_type, gtm_file_to_process_name = all_gtm_downloaded_files[0]
+                if len(all_gtm_downloaded_files) > 1:
+                    st.warning(f"Multiple GTM files found. Only '{gtm_file_to_process_name}' will be processed.")
+
+                st.write("Step 2/3: Loading and processing documents...")
+                
+                base_pptx_template_found = False
+                new_prs = None 
                 all_template_slides_for_ai = [] 
 
-                for uploaded_template_file in template_files:
-                    file_bytes = uploaded_template_file.getvalue()
-                    file_type = uploaded_template_file.type
-                    
+                for file_bytes, file_type, file_name in all_template_downloaded_files:
                     if file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
-                        if not initial_pptx_loaded:
+                        if not base_pptx_template_found:
                             new_prs = Presentation(io.BytesIO(file_bytes))
-                            st.info(f"Using '{uploaded_template_file.name}' as the primary base PPTX template.")
-                            initial_pptx_loaded = True
+                            st.info(f"Using '{file_name}' as the primary base PPTX template.")
+                            base_pptx_template_found = True
                         else:
                             current_prs_to_merge = Presentation(io.BytesIO(file_bytes))
-                            st.info(f"Merging slides from '{uploaded_template_file.name}' into the base template.")
+                            st.info(f"Merging slides from '{file_name}' into the base template.")
                             for slide_to_merge in current_prs_to_merge.slides:
                                 # Add a new blank slide to new_prs (with a generic layout)
-                                # and copy content from the merged PPTX slide
                                 new_slide = new_prs.slides.add_slide(new_prs.slide_layouts[0]) 
                                 deep_copy_slide_content(new_slide, slide_to_merge) 
-
+                    
                     # Collect data for AI analysis from ALL template files (PPTX and PDF)
                     all_template_slides_for_ai.extend(get_all_slide_data(file_bytes, file_type))
 
                 if new_prs is None:
-                    st.error("Error: At least one PPTX file must be uploaded in the 'Template Deck(s)' section to serve as the base for the assembled presentation.")
+                    st.error("Error: At least one PPTX file must be found in the 'Template Documents Paths' to serve as the base for the assembled presentation.")
                     st.stop() 
 
-                gtm_file_bytes = gtm_file_to_process.getvalue()
-                gtm_file_type = gtm_file_to_process.type 
-
                 process_log = []
-                st.write("Step 2/3: Building new presentation based on your structure...")
+                st.write("Step 3/3: Building new presentation based on your structure...")
                 
                 num_template_slides = len(new_prs.slides) 
                 num_structure_steps = len(st.session_state.structure)
 
                 if num_structure_steps < num_template_slides:
-                    # Iterate backwards to safely delete slides from the assembled presentation if structure is shorter
                     for i in range(num_template_slides - 1, num_structure_steps - 1, -1):
                         rId = new_prs.slides._sldIdLst[i].rId
                         new_prs.part.drop_rel(rId)
@@ -517,14 +633,11 @@ if template_files and gtm_files and api_key and st.session_state.structure:
                     log_entry = {"step": i + 1, "keyword": keyword, "action": action, "log": []}
                     
                     if action == "Copy from GTM (as is)":
-                        if gtm_file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation': 
-                            gtm_prs = Presentation(io.BytesIO(gtm_file_bytes))
-                            # Call find_slide_by_ai with the actual GTM PPTX file bytes
-                            result = find_slide_by_ai(api_key, gtm_file_bytes, gtm_file_type, keyword, "GTM Deck")
+                        if gtm_file_to_process_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation': 
+                            gtm_prs = Presentation(io.BytesIO(gtm_file_to_process_bytes))
+                            result = find_slide_by_ai(api_key, gtm_file_to_process_bytes, gtm_file_to_process_type, keyword, "GTM Deck")
                             log_entry["log"].append(f"**GTM Content Choice Justification (PPTX Copy):** {result['justification']}")
                             if result["slide"]:
-                                # When GTM is PPTX and result is from find_slide_by_ai on PPTX,
-                                # result["index"] gives us the index to access the original slide object.
                                 src_slide_object = gtm_prs.slides[result["index"]] 
                                 deep_copy_slide_content(dest_slide, src_slide_object)
                                 log_entry["log"].append(f"**Action:** Replaced Template slide {current_dest_slide_index + 1} with content from GTM PPTX slide {result['index'] + 1}.")
@@ -533,13 +646,11 @@ if template_files and gtm_files and api_key and st.session_state.structure:
                         else: 
                             log_entry["log"].append(f"**Warning:** 'Copy from GTM (as is)' is selected but GTM deck is a PDF. This action cannot directly copy PPTX shapes from a PDF. Proceeding with 'Merge' logic for content extraction based on text and assumed visuals.")
                             
-                            # Fallback to Merge logic for PDF GTM
-                            gtm_ai_selection_result = find_slide_by_ai(api_key, gtm_file_bytes, gtm_file_type, keyword, "GTM Deck (Content Source)")
+                            gtm_ai_selection_result = find_slide_by_ai(api_key, gtm_file_to_process_bytes, gtm_file_to_process_type, keyword, "GTM Deck (Content Source)")
                             log_entry["log"].append(f"**GTM Content Source Justification (PDF Fallback Merge):** {gtm_ai_selection_result['justification']}")
                             
                             raw_gtm_content = {"title": "", "body": ""}
                             if gtm_ai_selection_result["slide"]:
-                                # AI result for PDF doesn't give a slide object, just its data dict
                                 full_text = gtm_ai_selection_result["slide"].get("text", "")
                                 lines = full_text.split('\n')
                                 raw_gtm_content["title"] = lines[0] if lines else ""
@@ -563,14 +674,11 @@ if template_files and gtm_files and api_key and st.session_state.structure:
                                 log_entry["log"].append("**Action:** AI could not determine a suitable template layout or process content for PDF. Template slide was left as is.")
 
                     elif action == "Merge: Template Layout + GTM Content":
-                        # This logic path is for explicit "Merge" action, whether GTM is PPTX or PDF.
-                        # Call find_slide_by_ai with the GTM file bytes and type
-                        gtm_ai_selection_result = find_slide_by_ai(api_key, gtm_file_bytes, gtm_file_type, keyword, "GTM Deck (Content Source)")
+                        gtm_ai_selection_result = find_slide_by_ai(api_key, gtm_file_to_process_bytes, gtm_file_to_process_type, keyword, "GTM Deck (Content Source)")
                         log_entry["log"].append(f"**GTM Content Source Justification:** {gtm_ai_selection_result['justification']}")
                         
                         raw_gtm_content = {"title": "", "body": ""}
                         if gtm_ai_selection_result["slide"]:
-                            # AI result for both PPTX and PDF will be a data dict
                             full_text = gtm_ai_selection_result["slide"].get("text", "")
                             lines = full_text.split('\n')
                             raw_gtm_content["title"] = lines[0] if lines else ""
@@ -589,7 +697,7 @@ if template_files and gtm_files and api_key and st.session_state.structure:
 
                         if selected_template_index != -1 and selected_template_index < len(new_prs.slides):
                             populate_slide(dest_slide, processed_content)
-                            log_entry["log"].append(f"**Action:** Merged processed content from GTM ({gtm_file_to_process.name}) page/slide {gtm_ai_selection_result['index'] + 1} into Template slide {current_dest_slide_index + 1}, with regional placeholders. AI suggested template type from template index {selected_template_index + 1}.")
+                            log_entry["log"].append(f"**Action:** Merged processed content from GTM ({gtm_file_to_process_name}) page/slide {gtm_ai_selection_result['index'] + 1} into Template slide {current_dest_slide_index + 1}, with regional placeholders. AI suggested template type from template index {selected_template_index + 1}.")
                         else:
                             log_entry["log"].append("**Action:** AI could not determine a suitable template layout or process content. Template slide was left as is.")
                     
@@ -619,5 +727,5 @@ if template_files and gtm_files and api_key and st.session_state.structure:
                 st.error(f"A critical error occurred: {e}")
                 st.exception(e)
 else:
-    st.info("Please provide an API Key, upload at least one Template Deck (PPTX or PDF) and a GTM Global Deck (PPTX or PDF), and define the structure in the sidebar to begin.")
+    st.info("Please provide an API Key, GitHub Repository URL, paths to Template/GTM documents, and define the structure in the sidebar to begin.")
 
