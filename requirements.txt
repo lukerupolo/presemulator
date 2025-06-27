@@ -1,5 +1,3 @@
 streamlit
 python-pptx
-unoconv
-pdfplumber
-openai
+openai>=1.0.0
