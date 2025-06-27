@@ -1,6 +1,6 @@
 import streamlit as st
 from pptx import Presentation
-from pptx.util import Pt  # <--- FIX: Added this import statement
+from pptx.util import Pt
 import openai
 import io
 import os
@@ -77,7 +77,10 @@ def get_ai_modified_content(api_key, original_texts, user_prompt):
 
     except Exception as e:
         st.error(f"An error occurred while communicating with OpenAI: {e}")
-        st.error(f"OpenAI Response (if any): {response_content if 'response_content' in locals() else 'N/A'}")
+        response_content = "N/A"
+        if 'response' in locals() and hasattr(response, 'text'):
+            response_content = response.text
+        st.error(f"OpenAI Response (if any): {response_content}")
         return None
 
 
@@ -91,19 +94,18 @@ def update_presentation_with_new_text(prs, new_texts):
         return prs
 
     for i, slide in enumerate(prs.slides):
+        if i >= len(new_texts):
+            break 
         new_text = new_texts[i]
         
-        # Heuristic: Find the largest text placeholder (body) to replace content
         body_shape = None
         for shape in slide.placeholders:
-            # Check for body or object placeholders which typically hold the main content
             if shape.placeholder_format.type in ('BODY', 'OBJECT'):
                  body_shape = shape
                  break
         
-        # Fallback: find the shape with the most text if no standard body placeholder is found
         if not body_shape:
-            max_text_len = -1 # Use -1 to ensure any shape with text is chosen
+            max_text_len = -1
             candidate_shape = None
             for shape in slide.shapes:
                 if shape.has_text_frame and len(shape.text) > max_text_len:
@@ -113,13 +115,11 @@ def update_presentation_with_new_text(prs, new_texts):
         
         if body_shape:
             text_frame = body_shape.text_frame
-            text_frame.clear()  # Clear existing content
+            text_frame.clear()
             p = text_frame.paragraphs[0]
             p.text = new_text
-            p.font.size = Pt(18) # You can set a default font size
+            p.font.size = Pt(18)
         else:
-            # If still no suitable shape, you might add a new text box
-            # For now, we'll just log a warning for that slide
             st.warning(f"Could not find a suitable text box on slide {i+1} to replace content.")
 
     return prs
@@ -132,4 +132,64 @@ st.write("This application uses AI to analyze and rewrite the content of your Po
 
 # --- Sidebar for Inputs ---
 with st.sidebar:
+    st.header("Controls")
+    api_key = st.text_input("Enter your OpenAI API Key", type="password")
     
+    st.markdown("---")
+    
+    uploaded_file = st.file_uploader("1. Upload a PowerPoint (.pptx)", type=["pptx"])
+    
+    st.markdown("---")
+
+    user_prompt = st.text_area(
+        "2. Enter your editing instruction",
+        height=150,
+        placeholder="e.g., 'Rewrite the objectives on these slides to reflect an Australian market perspective.' or 'Summarize the key points on each slide into three bullet points.'"
+    )
+
+# --- Main App Logic ---
+if uploaded_file is not None:
+    original_filename = uploaded_file.name
+    
+    if st.button("✨ Process Presentation with AI", type="primary"):
+        if not api_key:
+            st.error("Please enter your OpenAI API key in the sidebar.")
+        elif not user_prompt:
+            st.error("Please enter an instruction for the AI in the sidebar.")
+        else:
+            with st.spinner("Processing your presentation... This may take a moment."):
+                # FIX: This entire block is now correctly indented
+                try:
+                    st.write("Step 1/4: Reading your presentation...")
+                    file_content = uploaded_file.getvalue()
+                    prs = Presentation(io.BytesIO(file_content))
+                    original_texts = extract_text_from_pptx(prs)
+
+                    st.write("Step 2/4: Asking the AI to rewrite the content...")
+                    modified_texts = get_ai_modified_content(api_key, original_texts, user_prompt)
+
+                    if modified_texts:
+                        st.write("Step 3/4: Updating the slides with the new content...")
+                        prs_to_edit = Presentation(io.BytesIO(file_content))
+                        update_presentation_with_new_text(prs_to_edit, modified_texts)
+
+                        st.write("Step 4/4: Preparing your download...")
+                        output_buffer = io.BytesIO()
+                        prs_to_edit.save(output_buffer)
+                        output_buffer.seek(0)
+                        
+                        base, ext = os.path.splitext(original_filename)
+                        new_filename = f"{base}_ai_modified.pptx"
+
+                        st.success("🎉 Your presentation has been successfully modified!")
+                        
+                        st.download_button(
+                            label="Download Modified PowerPoint",
+                            data=output_buffer,
+                            file_name=new_filename,
+                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        )
+                except Exception as e:
+                    st.error(f"A critical error occurred: {e}")
+else:
+    st.info("Upload a PowerPoint file and provide your API key and instructions in the sidebar to begin.")
