@@ -9,7 +9,7 @@ import copy
 import uuid
 import openai
 import json
-import base64 # Still imported for potential future Base64 needs, but not for placeholder
+import base64
 
 # --- Helper Function for Copying Background (PPTX-specific) ---
 def copy_slide_background(src_slide, dest_slide):
@@ -186,7 +186,7 @@ def get_all_slide_data(file_bytes: bytes, file_type: str):
 def find_slide_by_ai(api_key, file_bytes: bytes, file_type: str, slide_type_prompt: str, deck_name: str):
     """
     Uses a multimodal AI (gpt-4o) to intelligently find the best matching slide/page
-    based on combined text and visual content (assumed to be read directly by AI).
+    based on combined text and (assumed) visual content.
     """
     if not slide_type_prompt: return {"slide": None, "index": -1, "justification": "No keyword provided."}
     
@@ -216,7 +216,7 @@ def find_slide_by_ai(api_key, file_bytes: bytes, file_type: str, slide_type_prom
     ]
     for slide_info in slides_data:
         user_parts.append({"type": "text", "text": f"\n--- Page/Slide {slide_info['slide_index'] + 1} (Text): {slide_info['text']}"})
-        # Removed explicit image_url here as per user's assumption of direct visual reading by AI
+        # No explicit image_url here, assuming AI can directly read visuals from the file context
     
     messages = [
         {"role": "system", "content": system_prompt},
@@ -246,8 +246,8 @@ def find_slide_by_ai(api_key, file_bytes: bytes, file_type: str, slide_type_prom
 
 def analyze_and_map_content(api_key, gtm_slide_content_data, template_slides_data, user_keyword):
     """
-    Uses a multimodal AI (gpt-4o) to analyze GTM content (text + visual), find the best
-    template layout (text + visual), and process the GTM content by inserting regional placeholders.
+    Uses a multimodal AI (gpt-4o) to analyze GTM content (text + assumed visual), find the best
+    template layout (text + assumed visual), and process the GTM content by inserting regional placeholders.
     """
     if not api_key:
         return {"best_template_index": -1, "justification": "OpenAI API Key is missing.", "processed_content": gtm_slide_content_data}
@@ -288,13 +288,13 @@ def analyze_and_map_content(api_key, gtm_slide_content_data, template_slides_dat
         {"type": "text", "text": f"User's original keyword for this content: '{user_keyword}'"},
         {"type": "text", "text": "GTM Slide/Page Content to Process (Text):"},
         {"type": "text", "text": json.dumps(gtm_slide_content_data.get('text', {}), indent=2)},
-        # Removed explicit GTM slide image_url here
+        # No explicit image_url here, assuming AI can directly read visuals from the file context
     ]
 
     user_parts.append({"type": "text", "text": "\nAvailable Template Slides/Pages Summary and Visuals:"})
     for slide_info in template_slides_data:
         user_parts.append({"type": "text", "text": f"\n--- Template Slide/Page {slide_info['slide_index'] + 1} (Text): {slide_info['text']}"})
-        # Removed explicit template slide image_url here
+        # No explicit image_url here, assuming AI can directly read visuals from the file context
     
     messages = [
         {"role": "system", "content": system_prompt},
@@ -406,9 +406,10 @@ with st.sidebar:
     api_key = st.text_input("OpenAI API Key", type="password")
     st.markdown("---")
     st.header("2. Upload Decks")
-    template_files = st.file_uploader("Upload Template Deck(s) (PPTX)", type=["pptx"], accept_multiple_files=True)
-    # GTM Global deck can be PPTX or PDF
-    gtm_file = st.file_uploader("Upload GTM Global Deck (PPTX or PDF)", type=["pptx", "pdf"])
+    # Template deck now accepts multiple PPTX or PDF files
+    template_files = st.file_uploader("Upload Template Deck(s) (PPTX or PDF)", type=["pptx", "pdf"], accept_multiple_files=True)
+    # GTM Global deck accepts multiple PPTX or PDF files
+    gtm_files = st.file_uploader("Upload GTM Global Deck(s) (PPTX or PDF)", type=["pptx", "pdf"], accept_multiple_files=True)
     st.markdown("---")
     st.header("3. Define Presentation Structure")
     
@@ -416,7 +417,7 @@ with st.sidebar:
         st.session_state.structure = []
     
     if st.button("Add New Step", use_container_width=True):
-        st.session_session.structure.append({"id": str(uuid.uuid4()), "keyword": "", "action": "Copy from GTM (as is)"})
+        st.session_state.structure.append({"id": str(uuid.uuid4()), "keyword": "", "action": "Copy from GTM (as is)"})
 
     for i, step in enumerate(st.session_state.structure):
         with st.container(border=True):
@@ -437,14 +438,39 @@ with st.sidebar:
         st.rerun()
 
 # --- Main App Logic ---
-if template_files and gtm_file and api_key and st.session_state.structure:
+if template_files and gtm_files and api_key and st.session_state.structure:
+    # Process only the first uploaded GTM file, and warn if multiple are uploaded
+    gtm_file_to_process = gtm_files[0]
+    if len(gtm_files) > 1:
+        st.warning("Multiple GTM files uploaded. Only the first file will be processed.")
+
     if st.button("🚀 Assemble Presentation", type="primary"):
         with st.spinner("Assembling your new presentation..."):
             try:
                 st.write("Step 1/3: Loading decks...")
-                new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
-                gtm_file_bytes = gtm_file.getvalue()
-                gtm_file_type = gtm_file.type # Get the actual MIME type of the uploaded GTM file
+                
+                # --- Find the base PPTX template for output ---
+                base_pptx_template = None
+                all_template_slides_for_ai = []
+                for uploaded_template_file in template_files:
+                    file_bytes = uploaded_template_file.getvalue()
+                    file_type = uploaded_template_file.type
+                    
+                    if file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation' and base_pptx_template is None:
+                        base_pptx_template = uploaded_template_file # Use the first PPTX found as base
+                        st.info(f"Using '{uploaded_template_file.name}' as the base PPTX template.")
+                    
+                    # Collect data for AI analysis from ALL template files (PPTX and PDF)
+                    all_template_slides_for_ai.extend(get_all_slide_data(file_bytes, file_type))
+
+                if base_pptx_template is None:
+                    st.error("Error: A PPTX file must be uploaded in the 'Template Deck(s)' section to serve as the base for the assembled presentation.")
+                    st.stop() # Halt execution if no base PPTX is found
+
+                new_prs = Presentation(io.BytesIO(base_pptx_template.getvalue())) # Initialize from the found PPTX template
+
+                gtm_file_bytes = gtm_file_to_process.getvalue()
+                gtm_file_type = gtm_file_to_process.type 
 
                 process_log = []
                 st.write("Step 2/3: Building new presentation based on your structure...")
@@ -469,7 +495,7 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                     dest_slide = new_prs.slides[current_dest_slide_index] 
                     
                     keyword = step["keyword"]
-                    action = step["action"] # Get the action selected by the user
+                    action = step["action"]
                     
                     log_entry = {"step": i + 1, "keyword": keyword, "action": action, "log": []}
                     
@@ -479,7 +505,6 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                             result = find_slide_by_ai(api_key, gtm_file_bytes, gtm_file_type, keyword, "GTM Deck")
                             log_entry["log"].append(f"**GTM Content Choice Justification (PPTX Copy):** {result['justification']}")
                             if result["slide"]:
-                                # find_slide_by_ai returns a dict, need to get the actual slide object from gtm_prs
                                 src_slide_object = gtm_prs.slides[result["index"]] 
                                 deep_copy_slide_content(dest_slide, src_slide_object)
                                 log_entry["log"].append(f"**Action:** Replaced Template slide {current_dest_slide_index + 1} with content from GTM PPTX slide {result['index'] + 1}.")
@@ -487,24 +512,22 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                                 log_entry["log"].append("**Action:** No suitable slide found in GTM PPTX deck. Template slide was left as is.")
                         else: # GTM is PDF for "Copy as is"
                             log_entry["log"].append(f"**Warning:** 'Copy from GTM (as is)' is selected but GTM deck is a PDF. This action cannot directly copy PPTX shapes from a PDF. Proceeding with 'Merge' logic for content extraction based on text and assumed visuals.")
-                            # Fallback to Merge logic
+                            
                             gtm_ai_selection_result = find_slide_by_ai(api_key, gtm_file_bytes, gtm_file_type, keyword, "GTM Deck (Content Source)")
                             log_entry["log"].append(f"**GTM Content Source Justification (PDF Fallback Merge):** {gtm_ai_selection_result['justification']}")
                             
-                            raw_gtm_content = {"title": "", "body": ""} # Removed image_data key here
+                            raw_gtm_content = {"title": "", "body": ""}
                             if gtm_ai_selection_result["slide"]:
                                 full_text = gtm_ai_selection_result["slide"].get("text", "")
                                 lines = full_text.split('\n')
                                 raw_gtm_content["title"] = lines[0] if lines else ""
                                 raw_gtm_content["body"] = "\n".join(lines[1:]) if len(lines) > 1 else ""
 
-                            template_file_bytes = template_files[0].getvalue() 
-                            template_slides_data = get_all_slide_data(template_file_bytes, 'pptx')
-
+                            # Use all_template_slides_for_ai for template data
                             ai_mapping_result = analyze_and_map_content(
                                 api_key, 
-                                raw_gtm_content, # Pass text-only content
-                                template_slides_data, # Pass text-only template data
+                                raw_gtm_content,
+                                all_template_slides_for_ai, # Pass all template data (PPTX+PDF) for AI
                                 keyword
                             )
                             log_entry["log"].append(f"**AI Template Mapping Justification (PDF Fallback Merge):** {ai_mapping_result['justification']}")
@@ -514,7 +537,7 @@ if template_files and gtm_file and api_key and st.session_state.structure:
 
                             if selected_template_index != -1 and selected_template_index < len(new_prs.slides):
                                 populate_slide(dest_slide, processed_content)
-                                log_entry["log"].append(f"**Action:** Merged processed content from GTM (PDF) page {gtm_ai_selection_result['index'] + 1} into Template slide {current_dest_slide_index + 1}, with regional placeholders. AI suggested template type at index {selected_template_index + 1}.")
+                                log_entry["log"].append(f"**Action:** Merged processed content from GTM (PDF) page {gtm_ai_selection_result['index'] + 1} into Template slide {current_dest_slide_index + 1}, with regional placeholders. AI suggested template type from template index {selected_template_index + 1}.")
                             else:
                                 log_entry["log"].append("**Action:** AI could not determine a suitable template layout or process content for PDF. Template slide was left as is.")
 
@@ -522,20 +545,18 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                         gtm_ai_selection_result = find_slide_by_ai(api_key, gtm_file_bytes, gtm_file_type, keyword, "GTM Deck (Content Source)")
                         log_entry["log"].append(f"**GTM Content Source Justification:** {gtm_ai_selection_result['justification']}")
                         
-                        raw_gtm_content = {"title": "", "body": ""} # Removed image_data key here
+                        raw_gtm_content = {"title": "", "body": ""}
                         if gtm_ai_selection_result["slide"]:
                             full_text = gtm_ai_selection_result["slide"].get("text", "")
                             lines = full_text.split('\n')
                             raw_gtm_content["title"] = lines[0] if lines else ""
                             raw_gtm_content["body"] = "\n".join(lines[1:]) if len(lines) > 1 else ""
 
-                        template_file_bytes = template_files[0].getvalue() 
-                        template_slides_data = get_all_slide_data(template_file_bytes, 'pptx')
-
+                        # Use all_template_slides_for_ai for template data
                         ai_mapping_result = analyze_and_map_content(
                             api_key, 
                             raw_gtm_content,
-                            template_slides_data, 
+                            all_template_slides_for_ai, # Pass all template data (PPTX+PDF) for AI
                             keyword
                         )
                         log_entry["log"].append(f"**AI Template Mapping Justification:** {ai_mapping_result['justification']}")
@@ -545,7 +566,7 @@ if template_files and gtm_file and api_key and st.session_state.structure:
 
                         if selected_template_index != -1 and selected_template_index < len(new_prs.slides):
                             populate_slide(dest_slide, processed_content)
-                            log_entry["log"].append(f"**Action:** Merged processed content from GTM ({gtm_file.name}) page/slide {gtm_ai_selection_result['index'] + 1} into Template slide {current_dest_slide_index + 1}, with regional placeholders. AI suggested template type at index {selected_template_index + 1}.")
+                            log_entry["log"].append(f"**Action:** Merged processed content from GTM ({gtm_file_to_process.name}) page/slide {gtm_ai_selection_result['index'] + 1} into Template slide {current_dest_slide_index + 1}, with regional placeholders. AI suggested template type from template index {selected_template_index + 1}.")
                         else:
                             log_entry["log"].append("**Action:** AI could not determine a suitable template layout or process content. Template slide was left as is.")
                     
@@ -575,5 +596,5 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                 st.error(f"A critical error occurred: {e}")
                 st.exception(e)
 else:
-    st.info("Please provide an API Key, upload at least one Template Deck (PPTX) and a GTM Global Deck (PPTX or PDF), and define the structure in the sidebar to begin.")
+    st.info("Please provide an API Key, upload at least one Template Deck (PPTX or PDF) and a GTM Global Deck (PPTX or PDF), and define the structure in the sidebar to begin.")
 
