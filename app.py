@@ -1,168 +1,122 @@
+# app.py
+# Streamlit Hybrid Style-Copy PPTX Extractor
+
 import streamlit as st
-import openai
 import subprocess
 import tempfile
-import json
-import shutil
 import os
+import shutil
 from pptx import Presentation
+from pptx.dml.color import RGBColor
 
-# --- Sidebar: OpenAI key ---
-st.set_page_config(page_title="AI PPTX Style Extractor")
-st.title("AI PPTX Style Extractor")
-api_key = st.sidebar.text_input("OpenAI API Key", type="password")
-if not api_key:
-    st.sidebar.warning("Enter your OpenAI API key to proceed.")
-    st.stop()
-openai.api_key = api_key
+st.set_page_config(page_title="Hybrid Style-Copy PPTX Extractor")
+st.title("Hybrid Style-Copy PPTX Extractor")
 
 # --- Helper functions ---
-def sanitize_code(code: str) -> str:
-    """
-    Remove any backtick lines and narrative prefixes to produce clean Python.
-    """
-    lines = code.splitlines()
-    clean = []
-    for line in lines:
-        # Skip markdown fences or any line of backticks
-        if line.strip().startswith('```'):
-            continue
-        # Skip narrative commentary lines
-        if not (line.strip().startswith('import') or
-                line.strip().startswith('from') or
-                line.strip().startswith('def') or
-                line.strip().startswith('prs') or
-                line.strip().startswith('slide') or
-                line.strip().startswith('#')):
-            # allow code blocks starting with these python keywords
-            # else assume narrative, skip
-            words = line.strip().split()
-            if words and words[0].endswith(':'):
-                # leave function/class definitions
-                clean.append(line)
-            else:
-                continue
-        else:
-            clean.append(line)
-    return '\n'.join(clean)
-
 
 def parse_pptx(path: str) -> dict:
     prs = Presentation(path)
     slides = []
-    for slide in prs.slides:
-        layout = slide.slide_layout.name if slide.slide_layout else "Custom"
-        bg = slide.background.fill
-        bg_color = None
-        if bg and bg.type == 1:
-            rgb = bg.fore_color.rgb
-            bg_color = f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
+    for idx, slide in enumerate(prs.slides):
         elements = []
-        for shape in slide.shapes:
+        for i, shape in enumerate(slide.shapes):
             tf = getattr(shape, 'text_frame', None)
-            if not tf:
-                continue
-            text = ''.join(run.text for p in tf.paragraphs for run in p.runs)
-            font_info = {'name': None, 'size': None, 'bold': False, 'italic': False}
-            runs = tf.paragraphs[0].runs if tf.paragraphs else []
-            if runs:
-                fnt = runs[0].font
-                font_info = {
-                    'name': fnt.name,
-                    'size': fnt.size.pt if fnt.size else None,
-                    'bold': bool(fnt.bold),
-                    'italic': bool(fnt.italic)
-                }
+            text = ''
+            if tf:
+                text = ''.join(run.text for p in tf.paragraphs for run in p.runs)
             elements.append({
-                'text': text,
-                'font': font_info,
-                'position': {'x': shape.left.pt, 'y': shape.top.pt,
-                             'w': shape.width.pt, 'h': shape.height.pt}
+                'shape_idx': i,
+                'text': text
             })
-        slides.append({'layout': layout, 'background_color': bg_color, 'elements': elements})
+        slides.append({
+            'slide_index': idx,
+            'elements': elements
+        })
     return {'slides': slides}
 
 
 def convert_pdf_to_pptx(pdf_path: str) -> str:
+    # Requires unoconv installed
     pptx_path = pdf_path.replace('.pdf', '.pptx')
     subprocess.run(['unoconv', '-f', 'pptx', pdf_path], check=True)
     return pptx_path
 
 
-def call_openai_to_generate_code(slides_json: dict) -> str:
-    system = (
-        "You are a code generator. Given JSON describing slides, produce Python code using python-pptx"
-        " that recreates each slide with fonts, positions, and colors."
-    )
-    response = openai.chat.completions.create(
-        model="gpt-4",
-        messages=[
-            {'role': 'system', 'content': system},
-            {'role': 'user', 'content': json.dumps(slides_json, indent=2)}
-        ],
-        temperature=0
-    )
-    return response.choices[0].message.content
-
-
-def run_generated_code(code: str) -> str:
-    clean = sanitize_code(code)
-    with tempfile.TemporaryDirectory() as tmp:
-        script = os.path.join(tmp, 'gen.py')
-        with open(script, 'w') as f:
-            f.write(clean)
-        try:
-            result = subprocess.run(
-                ['python', script], cwd=tmp,
-                capture_output=True, text=True, check=True
-            )
-        except subprocess.CalledProcessError as e:
-            st.error('Error executing generated code:')
-            st.code(e.stderr)
-            raise
-        out = os.path.join(tmp, 'recreated.pptx')
-        if not os.path.exists(out):
-            st.error("Expected 'recreated.pptx' not found.")
-            raise FileNotFoundError(out)
-        dest = tempfile.mktemp(suffix='.pptx')
-        shutil.copy(out, dest)
-        return dest
+def copy_shape_style(src_shape, tgt_shape):
+    # Copy fill
+    if src_shape.fill.type == 1:
+        tgt_shape.fill.solid()
+        rgb = src_shape.fill.fore_color.rgb
+        tgt_shape.fill.fore_color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
+    # Copy line
+    if src_shape.line:
+        tgt_shape.line.fill.solid()
+        clr = src_shape.line.color.rgb
+        tgt_shape.line.color.rgb = RGBColor(clr[0], clr[1], clr[2])
+        tgt_shape.line.width = src_shape.line.width
+    # Copy text & font
+    if src_shape.has_text_frame and tgt_shape.has_text_frame:
+        src_tf = src_shape.text_frame
+        tgt_tf = tgt_shape.text_frame
+        tgt_tf.text = src_tf.text
+        for src_run, tgt_run in zip(src_tf.paragraphs[0].runs, tgt_tf.paragraphs[0].runs):
+            tgt_run.font.name = src_run.font.name
+            tgt_run.font.size = src_run.font.size
+            tgt_run.font.bold = src_run.font.bold
+            tgt_run.font.italic = src_run.font.italic
+            try:
+                tgt_run.font.color.rgb = src_run.font.color.rgb
+            except:
+                pass
 
 # --- Main UI ---
 uploaded = st.file_uploader('Upload PPTX or PDF', type=['pptx', 'pdf'])
 if uploaded:
+    # Save uploaded file
     suffix = os.path.splitext(uploaded.name)[1].lower()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmpf:
-        tmpf.write(uploaded.getbuffer())
-        tmp_path = tmpf.name
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+        tmp_file.write(uploaded.getbuffer())
+        tmp_path = tmp_file.name
+    # Convert PDF if needed
     if suffix == '.pdf':
         try:
             tmp_path = convert_pdf_to_pptx(tmp_path)
         except Exception as e:
             st.error(f"PDF→PPTX conversion failed: {e}")
             st.stop()
+
+    # Preview parsed JSON
     try:
         slides_json = parse_pptx(tmp_path)
+        st.json(slides_json)
     except Exception as e:
         st.error(f"Parsing failed: {e}")
         st.stop()
 
-    if st.button('Generate New PPTX'):
-        with st.spinner('Calling OpenAI...'):
-            try:
-                code = call_openai_to_generate_code(slides_json)
-            except Exception as e:
-                st.error(f"OpenAI call failed: {e}")
-                st.stop()
-        with st.spinner('Reconstructing slides...'):
-            try:
-                out_path = run_generated_code(code)
-            except Exception:
-                st.stop()
-        st.success('Done! Download below:')
-        data = open(out_path, 'rb').read()
-        st.download_button(
-            'Download PPTX', data=data,
-            file_name='recreated.pptx',
-            mime='application/vnd.openxmlformats-officedocument.presentationml.presentation'
-        )
+    # Hybrid regenerate
+    if st.button('Hybrid Regenerate'):
+        prs = Presentation(tmp_path)
+        new_prs = Presentation()
+        # Copy each slide
+        for slide in prs.slides:
+            new_slide = new_prs.slides.add_slide(new_prs.slide_layouts[5])
+            for shape in slide.shapes:
+                # Add same shape type and geometry
+                try:
+                    new_shape = new_slide.shapes.add_shape(
+                        shape.auto_shape_type,
+                        shape.left, shape.top,
+                        shape.width, shape.height
+                    )
+                    copy_shape_style(shape, new_shape)
+                except Exception:
+                    # Skip unsupported shapes
+                    continue
+        # Save & offer download
+        out_path = tempfile.mktemp(suffix='.pptx')
+        new_prs.save(out_path)
+        with open(out_path, 'rb') as f:
+            data = f.read()
+        st.download_button('Download Recreated PPTX', data=data,
+                           file_name='hybrid_recreated.pptx',
+                           mime='application/vnd.openxmlformats-officedocument.presentationml.presentation')
