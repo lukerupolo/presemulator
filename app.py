@@ -201,8 +201,9 @@ def get_all_slide_texts(prs):
         for shape in slide.shapes:
             if shape.has_text_frame:
                 slide_text_content.append(shape.text)
-        # Concatenate text, limit length to save tokens for AI
-        all_slides_text.append({"slide_index": i, "text": " ".join(slide_text_content)[:1000]})
+        # Concatenate text, limit length to save tokens for AI, but ensure enough context.
+        # Increased limit for better semantic understanding.
+        all_slides_text.append({"slide_index": i, "text": " ".join(slide_text_content)[:2000]}) 
     return all_slides_text
 
 
@@ -228,10 +229,23 @@ def find_slide_by_ai(api_key, prs, slide_type_prompt, deck_name):
         # Concatenate all text from the slide, limiting to first 1000 characters to save tokens
         slides_content.append({"slide_index": i, "text": " ".join(slide_text)[:1000]})
 
+    # --- UPDATED SYSTEM PROMPT FOR SMARTER TIMELINE DETECTION ---
     system_prompt = f"""
     You are an expert presentation analyst. Your task is to find the best slide in a presentation that matches a user's description.
     The user is looking for a slide representing: '{slide_type_prompt}'.
-    Analyze the text of each slide to understand its purpose. A "Timeline" slide VISUALLY represents a schedule with dates, quarters, or sequential phases (Phase 1, Phase 2); it is NOT just a list in a table of contents. An "Objectives" slide will contain goal-oriented language. You must prioritize actual content slides over simple divider or table of contents pages.
+    
+    Analyze the text of each slide to understand its purpose.
+    
+    **For 'Timeline' slides:** Look for strong indicators of sequential progression. These often include:
+    -   Explicit dates, years, quarters (e.g., "Q1 2024", "FY25", "2023-2025").
+    -   Phased language (e.g., "Phase 1", "Stage Two", "Initiation", "Completion").
+    -   Keywords like "roadmap", "milestones", "schedule", "plan", "future steps", "history".
+    -   Text that suggests a visual flow, even if sparse (e.g., short, concise points arranged vertically or horizontally, less dense paragraphs, indicating a graphic is present).
+    -   It is NOT just a list in a table of contents. Prioritize slides that imply a visual timeline structure, even if the text itself is minimal, if it contains strong temporal or sequential keywords.
+
+    **For 'Objectives' slides:** These will typically contain goal-oriented language, targets, key results, and strategic aims.
+
+    You must prioritize actual content slides over simple divider or table of contents pages.
     You MUST return a JSON object with two keys: 'best_match_index' (an integer, or -1 if no match) and 'justification' (a brief, one-sentence justification for your choice).
     """
     full_user_prompt = f"Find the best slide for '{slide_type_prompt}' in the '{deck_name}' deck with the following contents:\n{json.dumps(slides_content, indent=2)}"
