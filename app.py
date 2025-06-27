@@ -56,6 +56,15 @@ def find_slide_by_ai(api_key, prs, slide_type_prompt, deck_name):
     except Exception as e:
         return {"slide": None, "index": -1, "justification": f"An error occurred during analysis: {e}"}
 
+def find_slide_in_templates(api_key, template_prs_list, slide_type_prompt):
+    """Searches through all template presentations to find the best layout slide."""
+    for i, prs in enumerate(template_prs_list):
+        result = find_slide_by_ai(api_key, prs, slide_type_prompt, f"Template Deck {i+1}")
+        if result and result["slide"]:
+            # Return the first good match found across all templates
+            return result
+    return {"slide": None, "index": -1, "justification": "Could not find a suitable layout in any template deck."}
+
 def get_slide_content(slide):
     """Extracts title and body text from a slide."""
     if not slide: return {"title": "", "body": ""}
@@ -115,6 +124,7 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                 # CRITICAL: Use the first template as the base for the new presentation.
                 new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
                 gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
+                template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
                 
                 process_log = []
                 st.write("Step 2/3: Building new presentation based on your structure...")
@@ -140,15 +150,25 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                             log_entry["log"].append("**Action:** No suitable slide found in GTM deck. Template slide was left as is.")
                     
                     elif action == "Merge: Template Layout + GTM Content":
-                        content_result = find_slide_by_ai(api_key, gtm_prs, keyword, "GTM Deck")
-                        log_entry["log"].append(f"**GTM Content Choice Justification:** {content_result['justification']}")
-                        if content_result["slide"]:
-                            content = get_slide_content(content_result["slide"])
-                            populate_slide(dest_slide, content)
-                            log_entry["log"].append(f"**Action:** Merged content from GTM slide {content_result['index'] + 1} into Template slide {i+1}.")
+                        layout_result = find_slide_in_templates(api_key, template_prs_list, keyword)
+                        log_entry["log"].append(f"**Template Layout Choice Justification:** {layout_result['justification']}")
+                        
+                        if layout_result["slide"]:
+                            # First, replace the destination slide with the correct layout
+                            deep_copy_slide_content(dest_slide, layout_result["slide"])
+                            
+                            # Then, find the content and populate the now-correctly-styled slide
+                            content_result = find_slide_by_ai(api_key, gtm_prs, keyword, "GTM Deck")
+                            log_entry["log"].append(f"**GTM Content Choice Justification:** {content_result['justification']}")
+                            if content_result["slide"]:
+                                content = get_slide_content(content_result["slide"])
+                                populate_slide(dest_slide, content)
+                                log_entry["log"].append(f"**Action:** Merged content from GTM slide {content_result['index'] + 1} into Template slide {i+1} (using layout from Template slide {layout_result['index']+1}).")
+                            else:
+                                log_entry["log"].append("**Action:** Found layout, but no suitable content in GTM deck. Populated with layout only.")
                         else:
-                             log_entry["log"].append("**Action:** No suitable content found in GTM deck. Template slide was left as is.")
-                    
+                             log_entry["log"].append("**Action:** No suitable layout found in any template. Template slide was left as is.")
+
                     process_log.append(log_entry)
 
                 # Prune any unused slides from the end of the template
