@@ -165,6 +165,7 @@ if uploaded_file is not None:
                     if not classifications: raise ValueError("Could not classify slides.")
 
                     # 2. Identify slides to delete and prepare for summary
+                    st.write("Step 2/5: Pruning presentation based on classification...")
                     indices_to_delete = []
                     kept_slides_info = []
                     for i, classification in enumerate(classifications):
@@ -178,8 +179,9 @@ if uploaded_file is not None:
                                 "original_content": {"title": title_shape.text if title_shape else "", "body": body_shape.text if body_shape else ""}
                             })
                     
-                    st.write(f"Step 2/5: Pruning presentation... Deleting {len(indices_to_delete)} slide(s).")
                     delete_slides(prs, indices_to_delete)
+                    st.write(f"Kept {len(kept_slides_info)} slide(s) and deleted {len(indices_to_delete)} slide(s).")
+
 
                     # 3. Process remaining slides
                     st.write("Step 3/5: Adapting content for kept slides...")
