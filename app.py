@@ -1,5 +1,6 @@
 import streamlit as st
 from pptx import Presentation
+from pptx.util import Pt  # <--- FIX: Added this missing import
 import io
 import os
 import openai
@@ -48,6 +49,7 @@ def find_slides_by_title(prs, title_keyword):
     for slide in prs.slides:
         for shape in slide.shapes:
             if shape.has_text_frame and title_keyword.lower() in shape.text.lower():
+                # Heuristic to check if it's a title (often near the top of the slide)
                 if shape.top < Pt(150): 
                     found_slides.append(slide)
                     break 
@@ -67,11 +69,13 @@ def populate_text_in_shape(shape, text):
         return
         
     tf = shape.text_frame
+    # Clear all existing paragraphs by removing their XML elements
     for para in tf.paragraphs:
-        for run in para.runs:
-            run.text = ''
+        p = para._p
+        p.getparent().remove(p)
     
-    p = tf.paragraphs[0]
+    # Add a new paragraph and run for the new text
+    p = tf.add_paragraph()
     run = p.add_run()
     run.text = text
 
@@ -86,7 +90,6 @@ st.header("1. Upload Your Decks")
 col1, col2 = st.columns(2)
 
 with col1:
-    # UPDATED: Now accepts multiple files for the template bank
     template_files = st.file_uploader("Upload Template Deck(s) (.pptx)", type=["pptx"], accept_multiple_files=True, help="The 'slide bank' with approved layouts (e.g., Activation slide).")
 
 with col2:
@@ -100,11 +103,9 @@ if template_files and gtm_file:
             try:
                 # --- Step 1: Load all presentations ---
                 st.write("Step 1/4: Loading and analyzing decks...")
-                # Load all uploaded template files into a list
                 template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
                 gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
 
-                # Create the new presentation, matching the first template's size
                 new_prs = Presentation()
                 new_prs.slide_width = template_prs_list[0].slide_width
                 new_prs.slide_height = template_prs_list[0].slide_height
@@ -122,7 +123,6 @@ if template_files and gtm_file:
 
                 # --- Step 3: Find "Activation" slide in ALL templates, copy, then populate ---
                 st.write("Step 3/4: Finding 'Activation' slide in templates and populating...")
-                # Search across all provided template decks
                 activation_slide_from_template = find_slide_in_templates(template_prs_list, "activation")
 
                 if not activation_slide_from_template:
@@ -131,7 +131,7 @@ if template_files and gtm_file:
                     copied_activation_slide = clone_slide(new_prs, activation_slide_from_template)
                     
                     for shape in copied_activation_slide.shapes:
-                        if shape.has_text_frame and "Lorem Ipsum" in shape.text:
+                        if shape.has_text_frame and "Lorem Ipsum" in shape.text: # Simple heuristic to find body
                             populate_text_in_shape(shape, "Placeholder for regional activation details.\n- Tactic 1: [INSERT REGIONAL TACTIC]\n- Tactic 2: [INSERT REGIONAL TACTIC]\n- Budget: [INSERT REGIONAL BUDGET]")
                     
                     st.success("Added and populated 1 'Activation' slide from the template bank.")
