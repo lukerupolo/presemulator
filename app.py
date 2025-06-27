@@ -1,5 +1,5 @@
 # app.py
-# Hybrid Style-Copy PPTX Extractor with Robust Shape Handling
+# Hybrid Style-Copy PPTX Extractor with Enhanced Color Handling
 
 import streamlit as st
 import subprocess
@@ -10,9 +10,10 @@ from pptx import Presentation
 from pptx.dml.color import RGBColor
 
 st.set_page_config(page_title="Hybrid Style-Copy PPTX Extractor")
-st.title("Hybrid Style-Copy PPTX Extractor with Robust Shape Handling")
+st.title("Hybrid Style-Copy PPTX Extractor with Enhanced Color Handling")
 
 # --- Helper Functions ---
+
 def convert_pdf_to_pptx(pdf_path: str) -> str:
     """
     Convert PDF to PPTX using unoconv. Requires libreoffice/unoconv installed.
@@ -24,7 +25,7 @@ def convert_pdf_to_pptx(pdf_path: str) -> str:
 
 def parse_pptx(path: str) -> dict:
     """
-    Parse a PPTX into JSON for preview: slide index, shape texts.
+    Parse a PPTX into JSON for preview: slide index and texts of each shape.
     """
     prs = Presentation(path)
     slides = []
@@ -42,31 +43,41 @@ def parse_pptx(path: str) -> dict:
 
 def copy_shape_style(src_shape, tgt_shape):
     """
-    Copy fill, line, and text/font properties from src_shape to tgt_shape.
+    Copy fill, line, and text/font properties from src_shape to tgt_shape,
+    safely handling NoneColor and missing attributes.
     """
-    # Copy fill
-    if getattr(src_shape, 'fill', None) and src_shape.fill.type == 1:
-        tgt_shape.fill.solid()
-        rgb = src_shape.fill.fore_color.rgb
-        tgt_shape.fill.fore_color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
-    # Copy line
-    if getattr(src_shape, 'line', None):
-        tgt_shape.line.fill.solid()
-        clr = src_shape.line.color.rgb
-        tgt_shape.line.color.rgb = RGBColor(clr[0], clr[1], clr[2])
-        tgt_shape.line.width = src_shape.line.width
-    # Copy text & font
-    if src_shape.has_text_frame and tgt_shape.has_text_frame:
+    # Fill (solid only)
+    try:
+        if getattr(src_shape, 'fill', None) and src_shape.fill.type == 1:
+            tgt_shape.fill.solid()
+            rgb = src_shape.fill.fore_color.rgb
+            tgt_shape.fill.fore_color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
+    except Exception:
+        pass
+
+    # Line
+    try:
+        if getattr(src_shape, 'line', None) and getattr(src_shape.line, 'fill', None) and src_shape.line.fill.type == 1:
+            tgt_shape.line.fill.solid()
+            rgb = src_shape.line.color.rgb
+            tgt_shape.line.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
+            tgt_shape.line.width = src_shape.line.width
+    except Exception:
+        pass
+
+    # Text & Font
+    if getattr(src_shape, 'has_text_frame', False) and getattr(tgt_shape, 'has_text_frame', False):
         src_tf = src_shape.text_frame
         tgt_tf = tgt_shape.text_frame
+        # Copy full text
         tgt_tf.text = src_tf.text
         # Copy first paragraph runs
         for src_run, tgt_run in zip(src_tf.paragraphs[0].runs, tgt_tf.paragraphs[0].runs):
-            tgt_run.font.name = src_run.font.name
-            tgt_run.font.size = src_run.font.size
-            tgt_run.font.bold = src_run.font.bold
-            tgt_run.font.italic = src_run.font.italic
             try:
+                tgt_run.font.name = src_run.font.name
+                tgt_run.font.size = src_run.font.size
+                tgt_run.font.bold = src_run.font.bold
+                tgt_run.font.italic = src_run.font.italic
                 tgt_run.font.color.rgb = src_run.font.color.rgb
             except Exception:
                 pass
@@ -77,7 +88,7 @@ if not uploaded:
     st.info('Please upload a PowerPoint (.pptx) or PDF file.')
     st.stop()
 
-# Save uploaded file to temp
+# Save uploaded file to a temp path
 suffix = os.path.splitext(uploaded.name)[1].lower()
 with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
     tmp_file.write(uploaded.getbuffer())
@@ -91,14 +102,14 @@ if suffix == '.pdf':
         st.error(f"PDF→PPTX conversion failed: {e}")
         st.stop()
 
-# Load presentation
+# Load the presentation
 try:
     prs = Presentation(tmp_path)
 except Exception as e:
     st.error(f"Failed to load PPTX: {e}")
     st.stop()
 
-# Debug: slide and shape counts
+# Debug: Show slide and shape counts
 st.write(f"Found {len(prs.slides)} slide(s)")
 for idx, slide in enumerate(prs.slides):
     st.write(f"Slide {idx}: {len(slide.shapes)} shape(s)")
@@ -111,24 +122,20 @@ st.json(slides_json)
 # Hybrid Regenerate
 if st.button('Hybrid Regenerate'):
     new_prs = Presentation()
-    # Select a truly blank layout
+    # Choose a blank layout (no placeholders)
     blank_layout = next((l for l in new_prs.slide_layouts if not l.placeholders), new_prs.slide_layouts[0])
 
     for slide_idx, slide in enumerate(prs.slides):
         st.write(f"Regenerating slide {slide_idx}")
         new_slide = new_prs.slides.add_slide(blank_layout)
         for shape in slide.shapes:
-            # Safely get shape ID
-            shape_id = getattr(shape, 'shape_id', 'n/a')
-            # Safely get autoshape type
+            # Attempt to get an autoshape type
             try:
                 shape_type = shape.auto_shape_type
             except Exception:
-                shape_type = None
-            if not shape_type:
-                st.warning(f"Skipping non-autoshape (shape_id={shape_id})")
+                st.warning(f"Skipping non-autoshape (shape_idx={getattr(shape, 'shape_id', 'n/a')})")
                 continue
-            st.write(f"  Copying shape id={shape_id} type={shape_type}")
+            st.write(f"  Copying shape idx={getattr(shape, 'shape_id', 'n/a')} type={shape_type}")
             try:
                 new_shape = new_slide.shapes.add_shape(
                     shape_type,
@@ -137,10 +144,10 @@ if st.button('Hybrid Regenerate'):
                 )
                 copy_shape_style(shape, new_shape)
             except Exception as e:
-                st.error(f"Failed to copy shape_id={shape_id}: {e}")
+                st.error(f"Failed to copy shape (shape_idx={getattr(shape, 'shape_id', 'n/a')}): {e}")
                 continue
 
-    # Save regenerated deck
+    # Save and output the regenerated deck
     out_path = tempfile.mktemp(suffix='.pptx')
     new_prs.save(out_path)
     with open(out_path, 'rb') as f:
