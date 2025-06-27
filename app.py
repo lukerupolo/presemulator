@@ -65,20 +65,19 @@ def convert_pdf_to_pptx(pdf_path: str) -> str:
 
 
 def call_openai_to_generate_code(slides_json: dict) -> str:
-    # Use new OpenAI Python v1.0+ interface
+    # Use a valid model name
     system = (
         "You are a code generator. Given JSON describing slides, produce Python code using python-pptx"
         " that recreates each slide with fonts, positions, and colors."
     )
     response = openai.chat.completions.create(
-        model="gpt-4o-code",
+        model="gpt-4",
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps(slides_json, indent=2)}
         ],
         temperature=0
     )
-    # Extract content from new API response
     return response.choices[0].message.content
 
 
