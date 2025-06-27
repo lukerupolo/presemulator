@@ -2,85 +2,24 @@ import streamlit as st
 from pptx import Presentation
 from pptx.util import Pt
 from pptx.enum.shapes import MSO_SHAPE_TYPE
-from pptx.enum.dml import MSO_FILL_TYPE
 from pptx.dml.color import RGBColor
 import io
 import copy
 import uuid
 import openai
 import json
-import base64
 
-# --- Helper Function for Copying Background (PPTX-specific) ---
-def copy_slide_background(src_slide, dest_slide):
-    """
-    Copies the background properties (fill type, color, and image if present)
-    from the src_slide to the dest_slide. This involves low-level XML manipulation
-    for image backgrounds to ensure correct embedding and relationships.
-    """
-    src_slide_elm = src_slide.element
-    dest_slide_elm = dest_slide.element
+# --- Core PowerPoint Functions ---
 
-    src_bg_pr = src_slide_elm.find('.//p:bgPr', namespaces=src_slide_elm.nsmap)
-    
-    if src_bg_pr is None:
-        return
-
-    src_blip_fill = src_bg_pr.find('.//a:blipFill', namespaces=src_slide_elm.nsmap)
-    
-    if src_blip_fill is not None:
-        src_blip = src_blip_fill.find('.//a:blip', namespaces=src_slide_elm.nsmap)
-        if src_blip is not None and '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed' in src_blip.attrib:
-            rId = src_blip.attrib['{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed']
-            
-            try:
-                src_image_part = src_slide.part.related_part(rId)
-                image_bytes = src_image_part.blob
-                
-                new_image_part = dest_slide.part.get_or_add_image_part(image_bytes, src_image_part.content_type)
-                new_rId = dest_slide.part.relate_to(new_image_part, 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image')
-
-                new_bg_pr = copy.deepcopy(src_bg_pr)
-                new_blip = new_bg_pr.find('.//a:blip', namespaces=new_bg_pr.nsmap)
-                if new_blip is not None:
-                    new_blip.attrib['{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed'] = new_rId
-
-                current_bg = dest_slide_elm.find('.//p:bg', namespaces=dest_slide_elm.nsmap)
-                if current_bg is not None:
-                    current_bg.getparent().remove(current_bg)
-                
-                dest_slide_elm.append(new_bg_pr)
-                
-            except Exception as e:
-                print(f"Warning: Could not copy background image. Error: {e}")
-                copy_solid_or_gradient_background(src_slide, dest_slide)
-
-    else:
-        copy_solid_or_gradient_background(src_slide, dest_slide)
-
-def copy_solid_or_gradient_background(src_slide, dest_slide):
-    """
-    Helper to copy solid or gradient background fills using direct XML copy.
-    """
-    src_slide_elm = src_slide.element
-    dest_slide_elm = dest_slide.element
-    src_bg_pr = src_slide_elm.find('.//p:bgPr', namespaces=src_slide_elm.nsmap)
-
-    if src_bg_pr is not None:
-        new_bg_pr = copy.deepcopy(src_bg_pr)
-
-        current_bg = dest_slide_elm.find('.//p:bg', namespaces=dest_slide_elm.nsmap)
-        if current_bg is not None:
-            current_bg.getparent().remove(current_bg)
-        
-        dest_slide_elm.append(new_bg_pr)
-
-# --- Core PowerPoint Functions (for PPTX output generation) ---
 def deep_copy_slide_content(dest_slide, src_slide):
     """
-    Performs a stable deep copy of all shapes from a source PPTX slide to a
-    destination PPTX slide, handling different shape types robustly.
+    Performs a stable deep copy of all shapes from a source slide to a
+    destination slide, handling different shape types robustly.
+    This approach aims to minimize repair issues by using python-pptx's API
+    for common shape types, especially images and text.
     """
+    # Clear all shapes from the destination slide first to prepare it.
+    # This loop safely removes shapes by iterating on a copy of the shapes list.
     for shape in list(dest_slide.shapes):
         sp = shape.element
         sp.getparent().remove(sp)
@@ -89,48 +28,62 @@ def deep_copy_slide_content(dest_slide, src_slide):
         left, top, width, height = shape.left, shape.top, shape.width, shape.height
 
         if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+            # For pictures, extract the image data and re-add it using python-pptx's API.
+            # This is CRUCIAL for avoiding repair issues with images and ensuring proper embedding.
             try:
                 image_bytes = shape.image.blob
                 dest_slide.shapes.add_picture(io.BytesIO(image_bytes), left, top, width, height)
             except Exception as e:
+                # Log if an image cannot be copied, but continue with other shapes
                 print(f"Warning: Could not copy picture from source slide. Error: {e}")
+                # Fallback: if picture has a placeholder, try to copy its XML
                 if hasattr(shape, 'is_placeholder') and shape.is_placeholder:
                     new_el = copy.deepcopy(shape.element)
                     dest_slide.shapes._spTree.insert_element_before(new_el, 'p:extLst')
                 
         elif shape.has_text_frame:
+            # Create a new text box on the destination slide with the same dimensions
             new_shape = dest_slide.shapes.add_textbox(left, top, width, height)
             new_text_frame = new_shape.text_frame
-            new_text_frame.clear()
+            new_text_frame.clear() # Clear existing paragraphs to ensure a clean copy
 
+            # Copy text and formatting paragraph by paragraph, run by run
             for paragraph in shape.text_frame.paragraphs:
                 new_paragraph = new_text_frame.add_paragraph()
+                # Copy paragraph properties (e.g., alignment, indentation)
                 new_paragraph.alignment = paragraph.alignment
-                if hasattr(paragraph, 'level'):
+                if hasattr(paragraph, 'level'): # Bullet level
                     new_paragraph.level = paragraph.level
                 
+                # Copy runs with their font properties
                 for run in paragraph.runs:
                     new_run = new_paragraph.add_run()
                     new_run.text = run.text
                     
+                    # Copy essential font properties (bold, italic, underline, size)
                     new_run.font.bold = run.font.bold
                     new_run.font.italic = run.font.italic
                     new_run.font.underline = run.font.underline
-                    if run.font.size:
+                    if run.font.size: # Only copy if size is explicitly defined
                         new_run.font.size = run.font.size
                     
-                    if run.font.fill.type == MSO_FILL_TYPE.SOLID:
+                    # Copy font color if it's a solid fill RGB color
+                    if run.font.fill.type == 1: # MSO_FILL_TYPE.SOLID
                         new_run.font.fill.solid()
                         try:
+                            # Ensure color is an RGBColor object for direct assignment
                             if isinstance(run.font.fill.fore_color.rgb, RGBColor):
                                 new_run.font.fill.fore_color.rgb = run.font.fill.fore_color.rgb
                             else: 
-                                rgb_tuple = run.font.fill.fore_color.rgb
+                                # Attempt to convert to RGBColor if not already
+                                # This handles cases where color might be a theme color or other type
+                                rgb_tuple = run.font.fill.fore_color.rgb # Assuming it might be a tuple (R, G, B)
                                 new_run.font.fill.fore_color.rgb = RGBColor(rgb_tuple[0], rgb_tuple[1], rgb_tuple[2])
                         except Exception as color_e:
                             print(f"Warning: Could not copy font color. Error: {color_e}")
-                            pass
+                            pass # If color conversion fails, skip copying the color
 
+            # Copy text frame properties (word wrap, margins)
             new_text_frame.word_wrap = shape.text_frame.word_wrap
             new_text_frame.margin_left = shape.text_frame.margin_left
             new_text_frame.margin_right = shape.text_frame.margin_right
@@ -138,104 +91,60 @@ def deep_copy_slide_content(dest_slide, src_slide):
             new_text_frame.margin_bottom = shape.text_frame.margin_bottom
 
         else:
+            # For other shapes (e.g., simple geometric shapes, lines, groups, tables, charts),
+            # fall back to deep copying the raw XML element.
+            # This is less robust than using specific python-pptx add_* methods but necessary
+            # for types not directly supported by add_*.
+            # For complex custom shapes, this might still lead to minor issues,
+            # but is the best general approach without parsing deeper XML.
             new_el = copy.deepcopy(shape.element)
             dest_slide.shapes._spTree.insert_element_before(new_el, 'p:extLst')
-    
-    copy_slide_background(src_slide, dest_slide)
 
-
-def get_all_slide_data(file_bytes: bytes, file_type: str):
+def find_slide_by_ai(api_key, prs, slide_type_prompt, deck_name):
     """
-    Extracts text content from all slides/pages of a given file (PPTX or PDF).
-    Assumes AI can directly 'see' the visual content from the provided file_bytes.
-    """
-    all_slides_data = []
-
-    if file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation': # PPTX MIME type
-        prs = Presentation(io.BytesIO(file_bytes))
-        for i, slide in enumerate(prs.slides):
-            slide_text_content = []
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    slide_text_content.append(shape.text)
-            
-            all_slides_data.append({
-                "slide_index": i, 
-                "text": " ".join(slide_text_content)[:2000], # Limit text length for AI tokens
-            })
-    elif file_type == 'application/pdf': # PDF MIME type
-        # IMPORTANT: In a real application, you would use a library like PyMuPDF (fitz)
-        # to actually extract text from PDF pages. This current implementation
-        # provides dummy text for demonstration purposes only.
-        
-        # Simulate a few pages and dummy text
-        simulated_page_count = 5 
-        
-        for i in range(simulated_page_count):
-            all_slides_data.append({
-                "slide_index": i,
-                "text": f"Simulated text from PDF page {i+1}. This would be actual text extracted from the PDF page. It contains global sales figures for Q1 2024 and marketing initiatives for EMEA region. Also, key milestones for product launch in Q3.",
-            })
-    else:
-        st.error(f"Unsupported file type: {file_type}")
-        return []
-    
-    return all_slides_data
-
-
-def find_slide_by_ai(api_key, file_bytes: bytes, file_type: str, slide_type_prompt: str, deck_name: str):
-    """
-    Uses a multimodal AI (gpt-4o) to intelligently find the best matching slide/page
-    based on combined text and (assumed) visual content.
+    Uses OpenAI to intelligently find the best matching slide and get a justification.
+    Returns a dictionary with the slide object, its index, and the AI's justification.
     """
     if not slide_type_prompt: return {"slide": None, "index": -1, "justification": "No keyword provided."}
     
+    # Check if API key is provided and valid
     if not api_key:
         return {"slide": None, "index": -1, "justification": "OpenAI API Key is missing."}
 
     client = openai.OpenAI(api_key=api_key)
     
-    slides_data = get_all_slide_data(file_bytes, file_type) # Get text data only
+    slides_content = []
+    for i, slide in enumerate(prs.slides):
+        slide_text = []
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                slide_text.append(shape.text)
+        # Concatenate all text from the slide, limiting to first 1000 characters to save tokens
+        slides_content.append({"slide_index": i, "text": " ".join(slide_text)[:1000]})
 
     system_prompt = f"""
-    You are an expert presentation analyst. Your task is to find the best slide/page in a document that matches a user's description.
-    The user is looking for a slide/page representing: '{slide_type_prompt}'.
-    
-    Analyze both the provided **text content** and the **visual structure** of each slide/page to infer its purpose. Assume you can directly see the visual layout, charts, and images within the document.
-    
-    **For 'Timeline' slides/pages:** Look for strong textual indicators of sequential progression (dates, years, quarters, phased language like "Phase 1", "roadmap", "milestones"). **Crucially, also infer and describe visual patterns, such as horizontal or vertical arrangements of distinct elements, flow arrows, or clear segmentation over time. Do NOT rely solely on explicit textual labels (e.g., 'Timeline slide'). Focus on patterns that *imply* a visual timeline.** Prioritize slides/pages that combine strong textual cues with implied or explicit visual timeline structures.
-
-    **For 'Objectives' slides/pages:** These will typically contain goal-oriented language, targets, key results, and strategic aims in both text and visually organized lists or impact statements.
-
-    You must prioritize actual content slides/pages over simple divider or table of contents pages.
-    Return a JSON object with 'best_match_index' (integer, or -1) and 'justification' (brief, one-sentence).
+    You are an expert presentation analyst. Your task is to find the best slide in a presentation that matches a user's description.
+    The user is looking for a slide representing: '{slide_type_prompt}'.
+    Analyze the text of each slide to understand its purpose. A "Timeline" slide VISUALLY represents a schedule with dates, quarters, or sequential phases (Phase 1, Phase 2); it is NOT just a list in a table of contents. An "Objectives" slide will contain goal-oriented language. You must prioritize actual content slides over simple divider or table of contents pages.
+    You MUST return a JSON object with two keys: 'best_match_index' (an integer, or -1 if no match) and 'justification' (a brief, one-sentence justification for your choice).
     """
-
-    user_parts = [
-        {"type": "text", "text": f"Find the best slide/page for '{slide_type_prompt}' in the '{deck_name}' with the following pages/slides:"}
-    ]
-    for slide_info in slides_data:
-        user_parts.append({"type": "text", "text": f"\n--- Page/Slide {slide_info['slide_index'] + 1} (Text): {slide_info['text']}"})
-        # No explicit image_url here, assuming AI can directly read visuals from the file context
-    
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_parts}
-    ]
+    full_user_prompt = f"Find the best slide for '{slide_type_prompt}' in the '{deck_name}' deck with the following contents:\n{json.dumps(slides_content, indent=2)}"
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
+            model="gpt-4-turbo", 
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": full_user_prompt}],
             response_format={"type": "json_object"}
         )
         result = json.loads(response.choices[0].message.content)
         best_index = result.get("best_match_index", -1)
         justification = result.get("justification", "No justification provided.")
         
-        return {"slide": slides_data[best_index] if best_index != -1 else None, 
-                "index": best_index, 
-                "justification": justification}
+        # Validate the AI's chosen index
+        if best_index != -1 and best_index < len(prs.slides):
+            return {"slide": prs.slides[best_index], "index": best_index, "justification": justification}
+        else:
+            return {"slide": None, "index": -1, "justification": "AI could not find a suitable slide or returned an invalid index."}
     except openai.APIError as e:
         return {"slide": None, "index": -1, "justification": f"OpenAI API Error: {e}"}
     except json.JSONDecodeError as e:
@@ -243,110 +152,19 @@ def find_slide_by_ai(api_key, file_bytes: bytes, file_type: str, slide_type_prom
     except Exception as e:
         return {"slide": None, "index": -1, "justification": f"An unexpected error occurred during AI analysis: {e}"}
 
-
-def analyze_and_map_content(api_key, gtm_slide_content_data, template_slides_data, user_keyword):
-    """
-    Uses a multimodal AI (gpt-4o) to analyze GTM content (text + assumed visual), find the best
-    template layout (text + assumed visual), and process the GTM content by inserting regional placeholders.
-    """
-    if not api_key:
-        return {"best_template_index": -1, "justification": "OpenAI API Key is missing.", "processed_content": gtm_slide_content_data}
-
-    client = openai.OpenAI(api_key=api_key)
-
-    system_prompt = f"""
-    You are an expert presentation content mapper. Your primary task is to help a user
-    integrate content from a Global (GTM) slide/page into the most appropriate regional template.
-
-    Given the `gtm_slide_content` (with its text and assumed visual) and a list of `template_slides_data`
-    (each with an index and text content, and assumed visual), you must perform two critical tasks:
-
-    1.  **Select the BEST Template:**
-        * **Crucially, you must review *each and every* template slide/page text summary AND its associated visual content.**
-        * Semantically and **visually** evaluate which template slide's structure and implied purpose would *best* accommodate the `gtm_slide_content`. Assume you can directly see the visual layout, charts, and images within the document.
-        * **Perform a comparative analysis:** Do not just pick the first decent match. Compare all options to find the single most suitable template based on a combined understanding of text and visuals. **Prioritize templates where the text *implies* a strong visual match, rather than just explicitly stating a type.** For instance, a template with short, sequential bullet points and dates might be a better visual timeline fit than one that simply has "Timeline" in its title but dense paragraphs.
-        * Consider factors like:
-            * Does the template's textual layout (e.g., presence of sections, bullet points, titles) **and its visual layout (e.g., number of content blocks, placement of image placeholders, overall design)** match the theme/type of the GTM content.
-            * Is there sufficient space or logical sections in the template for the GTM content based on its textual and visual structure?
-            * Is the template visually appropriate for the content's nature (e.g., if GTM content is a timeline, does the template's visual suggest a timeline-like structure with distinct steps)?
-
-    2.  **Process GTM Content for Regionalization:**
-        * Analyze the `gtm_slide_content` (title and body text).
-        * Identify any parts of the text that are highly likely to be *regional-specific* (e.g., local market data, specific regional initiatives, detailed local performance figures, regional names, or examples relevant only to one region).
-        * For these regional-specific parts, replace them with a concise, generic placeholder like `[REGIONAL DATA HERE]`, `[LOCAL EXAMPLE]`, `[Qx REGIONAL METRICS]`, `[REGIONAL IMPACT]`, `[LOCAL TEAM]`, etc. Be intelligent about the placeholder text.
-        * The goal is to provide a global baseline with clear, actionable markers for regional teams to fill in.
-        * Maintain the original overall structure, headings, and flow of the text where possible.
-
-    You MUST return a JSON object with the following keys:
-    -   `best_template_index`: An integer representing the index of the best template slide/page from the `template_slides_data` list.
-    -   `justification`: A brief, one-sentence justification for choosing that template, explicitly mentioning why it's better than other contenders if applicable.
-    -   `processed_content`: An object with 'title' and 'body' keys, containing the
-        GTM content with regional placeholders inserted.
-    """
-    
-    user_parts = [
-        {"type": "text", "text": f"User's original keyword for this content: '{user_keyword}'"},
-        {"type": "text", "text": "GTM Slide/Page Content to Process (Text):"},
-        {"type": "text", "text": json.dumps(gtm_slide_content_data.get('text', {}), indent=2)},
-    ]
-
-    user_parts.append({"type": "text", "text": "\nAvailable Template Slides/Pages Summary and Visuals:"})
-    for slide_info in template_slides_data:
-        user_parts.append({"type": "text", "text": f"\n--- Template Slide/Page {slide_info['slide_index'] + 1} (Text): {slide_info['text']}"})
-    
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_parts}
-    ]
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            response_format={"type": "json_object"}
-        )
-        result = json.loads(response.choices[0].message.content)
-        
-        if "best_template_index" not in result or "justification" not in result or "processed_content" not in result:
-            raise ValueError("AI response missing required keys.")
-
-        best_index = result["best_template_index"]
-        justification = result["justification"]
-        processed_content = result["processed_content"]
-
-        if "title" not in processed_content: processed_content["title"] = gtm_slide_content_data.get("title", "")
-        if "body" not in processed_content: processed_content["body"] = gtm_slide_content_data.get("body", "")
-
-        return {
-            "best_template_index": best_index,
-            "justification": justification,
-            "processed_content": processed_content
-        }
-
-    except openai.APIError as e:
-        print(f"OpenAI API Error in analyze_and_map_content: {e}")
-        return {"best_template_index": -1, "justification": f"OpenAI API Error: {e}", "processed_content": gtm_slide_content_data}
-    except json.JSONDecodeError as e:
-        print(f"JSON Decode Error in analyze_and_map_content: {e}")
-        return {"best_template_index": -1, "justification": f"AI response was not valid JSON: {e}", "processed_content": gtm_slide_content_data}
-    except Exception as e:
-        print(f"An unexpected error occurred in analyze_and_map_content: {e}")
-        return {"best_template_index": -1, "justification": f"An error occurred during content mapping: {e}", "processed_content": gtm_slide_content_data}
-
-
 def get_slide_content(slide):
-    """
-    Extracts title and body text from a PPTX slide object.
-    This is used for the *destination* PPTX when populating.
-    """
+    """Extracts title and body text from a slide."""
     if not slide: return {"title": "", "body": ""}
     
+    # Sort text shapes by their top position to infer order (title usually highest)
     text_shapes = sorted([s for s in slide.shapes if s.has_text_frame and s.text.strip()], key=lambda s: s.top)
     
     title = ""
     body = ""
     
     if text_shapes:
+        # Heuristic for title: often the first (top-most) text shape.
+        # Could be improved by checking placeholder type (e.g., MSO_PLACEHOLDER_TYPE.TITLE)
         title = text_shapes[0].text.strip()
         body = "\n".join(s.text.strip() for s in text_shapes[1:])
         
@@ -354,243 +172,181 @@ def get_slide_content(slide):
 
 def populate_slide(slide, content):
     """
-    Populates a PPTX slide's placeholders or main text boxes with new content.
-    This content is expected to already contain any necessary regional placeholders.
+    Populates a slide's placeholders or main text boxes with new content.
+    It clears the existing content and adds new runs, aiming to use existing
+    placeholders without forcing bold.
     """
     title_populated, body_populated = False, False
     
+    # Iterate through shapes to find suitable places for title and body
     for shape in slide.shapes:
         if not shape.has_text_frame:
             continue
         
+        # Check if it's a title placeholder (type 1, 2, or object type 8 which can be title)
+        # Or if it's a top-positioned shape likely to be a title
         is_title_placeholder = (
             hasattr(shape, 'is_placeholder') and shape.is_placeholder and 
-            shape.placeholder_format.type in (1, 2, 8)
+            shape.placeholder_format.type in (1, 2, 8) # TITLE, CENTER_TITLE, OBJECT
         )
-        is_top_text_box = (shape.top < Pt(150))
+        is_top_text_box = (shape.top < Pt(150)) # Heuristic: within 1.5 inches from top
 
         if not title_populated and (is_title_placeholder or is_top_text_box):
             tf = shape.text_frame
-            tf.clear()
+            tf.clear() # Clear existing content
             p = tf.add_paragraph()
             run = p.add_run()
             run.text = content.get("title", "")
+            # No longer forcing bold here. The template's default formatting will apply.
             title_populated = True
             
+        # Check for body placeholders (type 3, 4, 8, 14) or large text boxes with dummy text
         is_body_placeholder = (
             hasattr(shape, 'is_placeholder') and shape.is_placeholder and 
-            shape.placeholder_format.type in (3, 4, 8, 14)
+            shape.placeholder_format.type in (3, 4, 8, 14) # BODY, OBJECT, CONTENT_TITLE_BODY
         )
         is_lorem_ipsum = "lorem ipsum" in shape.text.lower()
-        is_empty_text_box = not shape.text.strip() and shape.height > Pt(100)
+        is_empty_text_box = not shape.text.strip() and shape.height > Pt(100) # Heuristic for larger empty text boxes
 
         if not body_populated and (is_body_placeholder or is_lorem_ipsum or is_empty_text_box):
             tf = shape.text_frame
-            tf.clear()
+            tf.clear() # Clear existing content
             p = tf.add_paragraph()
             run = p.add_run()
             run.text = content.get("body", "")
+            # No longer forcing bold here.
             body_populated = True
 
         if title_populated and body_populated:
-            break
+            break # Exit loop once both title and body content are placed
 
 # --- Streamlit App ---
 st.set_page_config(page_title="Dynamic AI Presentation Assembler", layout="wide")
-st.title("📊 Dynamic AI Presentation Assembler")
+st.title("📊 Dynamic AI Presentation Assembler") # Updated emoji for presentation
 
 with st.sidebar:
     st.header("1. API Key & Decks")
     api_key = st.text_input("OpenAI API Key", type="password")
     st.markdown("---")
     st.header("2. Upload Decks")
-    template_files = st.file_uploader("Upload Template Deck(s) (PPTX or PDF)", type=["pptx", "pdf"], accept_multiple_files=True)
-    gtm_files = st.file_uploader("Upload GTM Global Deck(s) (PPTX or PDF)", type=["pptx", "pdf"], accept_multiple_files=True)
+    template_files = st.file_uploader("Upload Template Deck(s)", type=["pptx"], accept_multiple_files=True)
+    gtm_file = st.file_uploader("Upload GTM Global Deck", type=["pptx"])
     st.markdown("---")
     st.header("3. Define Presentation Structure")
     
+    # Initialize session state for structure if not present
     if 'structure' not in st.session_state: 
         st.session_state.structure = []
     
+    # Button to add a new step to the presentation structure
     if st.button("Add New Step", use_container_width=True):
         st.session_state.structure.append({"id": str(uuid.uuid4()), "keyword": "", "action": "Copy from GTM (as is)"})
 
+    # Display and manage each step in the structure
     for i, step in enumerate(st.session_state.structure):
-        with st.container(border=True):
-            cols = st.columns([3, 3, 1])
+        with st.container(border=True): # Use a container for visual separation
+            cols = st.columns([3, 3, 1]) # Three columns for keyword, action, and delete button
+            # Text input for the slide type keyword
             step["keyword"] = cols[0].text_input("Slide Type", step["keyword"], key=f"keyword_{step['id']}")
+            # Selectbox for the action to perform (Copy or Merge)
             step["action"] = cols[1].selectbox(
                 "Action", 
                 ["Copy from GTM (as is)", "Merge: Template Layout + GTM Content"], 
                 index=["Copy from GTM (as is)", "Merge: Template Layout + GTM Content"].index(step["action"]), 
                 key=f"action_{step['id']}"
             )
-            if cols[2].button("🗑️", key=f"del_{step['id']}"):
-                st.session_state.structure.pop(i)
-                st.rerun()
+            # Delete button for each step
+            if cols[2].button("🗑️", key=f"del_{step['id']}"): # Changed emoji for delete
+                st.session_state.structure.pop(i) # Remove the step
+                st.rerun() # Rerun to update the UI immediately
 
+    # Button to clear all defined steps
     if st.button("Clear Structure", use_container_width=True): 
         st.session_state.structure = []
         st.rerun()
 
 # --- Main App Logic ---
-if template_files and gtm_files and api_key and st.session_state.structure:
-    if not gtm_files: # Check if GTM files are uploaded
-        st.error("Please upload at least one file to the 'GTM Global Deck(s)' section.")
-        st.stop()
-
-    gtm_file_to_process = gtm_files[0]
-    if len(gtm_files) > 1:
-        st.warning("Multiple GTM files uploaded. Only the first file will be processed.")
-
-    if st.button("🚀 Assemble Presentation", type="primary"):
+# Check if all necessary inputs are provided before enabling assembly
+if template_files and gtm_file and api_key and st.session_state.structure:
+    # Button to trigger the presentation assembly process
+    if st.button("🚀 Assemble Presentation", type="primary"): # Changed emoji for assemble
         with st.spinner("Assembling your new presentation..."):
             try:
                 st.write("Step 1/3: Loading decks...")
+                # CRITICAL: Use the first uploaded template file as the base for the new presentation.
+                new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
+                gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
                 
-                base_pptx_template_bytes = None
-                initial_pptx_loaded = False
-                new_prs = None 
-
-                all_template_slides_for_ai = [] 
-
-                for uploaded_template_file in template_files:
-                    file_bytes = uploaded_template_file.getvalue()
-                    file_type = uploaded_template_file.type
-                    
-                    if file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
-                        if not initial_pptx_loaded:
-                            new_prs = Presentation(io.BytesIO(file_bytes))
-                            st.info(f"Using '{uploaded_template_file.name}' as the primary base PPTX template.")
-                            initial_pptx_loaded = True
-                        else:
-                            current_prs_to_merge = Presentation(io.BytesIO(file_bytes))
-                            st.info(f"Merging slides from '{uploaded_template_file.name}' into the base template.")
-                            for slide_to_merge in current_prs_to_merge.slides:
-                                new_slide = new_prs.slides.add_slide(new_prs.slide_layouts[0]) 
-                                deep_copy_slide_content(new_slide, slide_to_merge) 
-
-                    all_template_slides_for_ai.extend(get_all_slide_data(file_bytes, file_type))
-
-                if new_prs is None:
-                    st.error("Error: At least one PPTX file must be uploaded in the 'Template Deck(s)' section to serve as the base for the assembled presentation.")
-                    st.stop() 
-
-                gtm_file_bytes = gtm_file_to_process.getvalue()
-                gtm_file_type = gtm_file_to_process.type 
-
-                process_log = []
+                process_log = [] # To store logs of what happened during assembly
                 st.write("Step 2/3: Building new presentation based on your structure...")
                 
-                num_template_slides = len(new_prs.slides) 
+                num_template_slides = len(new_prs.slides)
                 num_structure_steps = len(st.session_state.structure)
 
+                # Prune excess slides from the template if the defined structure is shorter
                 if num_structure_steps < num_template_slides:
+                    # Iterate backwards to safely delete slides
                     for i in range(num_template_slides - 1, num_structure_steps - 1, -1):
-                        rId = new_prs.slides._sldIdLst[i].rId
-                        new_prs.part.drop_rel(rId)
-                        del new_prs.slides._sldIdLst[i]
-                    st.info(f"Removed {num_template_slides - num_structure_steps} unused slides from the merged template.")
+                        rId = new_prs.slides._sldIdLst[i].rId # Get relationship ID
+                        new_prs.part.drop_rel(rId) # Drop relationship
+                        del new_prs.slides._sldIdLst[i] # Delete slide from slide list
+                    st.info(f"Removed {num_template_slides - num_structure_steps} unused slides from the template.")
                 elif num_structure_steps > num_template_slides:
-                     st.warning(f"Warning: Your defined structure has more steps ({num_structure_steps}) than the merged template has slides ({num_template_slides}). Extra steps will be ignored.")
+                     st.warning(f"Warning: Your defined structure has more steps ({num_structure_steps}) than the template has slides ({num_template_slides}). Extra steps will be ignored.")
 
+                # Process slides based on the defined structure
                 for i, step in enumerate(st.session_state.structure):
+                    # Ensure we don't go out of bounds if the template was trimmed or structure is longer
                     if i >= len(new_prs.slides): 
                         break
 
-                    current_dest_slide_index = i
-                    dest_slide = new_prs.slides[current_dest_slide_index] 
-                    
-                    keyword = step["keyword"]
-                    action = step["action"]
-                    
+                    dest_slide = new_prs.slides[i] # Get the current destination slide from the new presentation
+                    keyword, action = step["keyword"], step["action"]
                     log_entry = {"step": i + 1, "keyword": keyword, "action": action, "log": []}
                     
                     if action == "Copy from GTM (as is)":
-                        if gtm_file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation': 
-                            gtm_prs = Presentation(io.BytesIO(gtm_file_bytes))
-                            result = find_slide_by_ai(api_key, gtm_file_bytes, gtm_file_type, keyword, "GTM Deck")
-                            log_entry["log"].append(f"**GTM Content Choice Justification (PPTX Copy):** {result['justification']}")
-                            if result["slide"]:
-                                src_slide_object = gtm_prs.slides[result["index"]] 
-                                deep_copy_slide_content(dest_slide, src_slide_object)
-                                log_entry["log"].append(f"**Action:** Replaced Template slide {current_dest_slide_index + 1} with content from GTM PPTX slide {result['index'] + 1}.")
-                            else:
-                                log_entry["log"].append("**Action:** No suitable slide found in GTM PPTX deck. Template slide was left as is.")
-                        else: 
-                            log_entry["log"].append(f"**Warning:** 'Copy from GTM (as is)' is selected but GTM deck is a PDF. This action cannot directly copy PPTX shapes from a PDF. Proceeding with 'Merge' logic for content extraction based on text and assumed visuals.")
-                            
-                            gtm_ai_selection_result = find_slide_by_ai(api_key, gtm_file_bytes, gtm_file_type, keyword, "GTM Deck (Content Source)")
-                            log_entry["log"].append(f"**GTM Content Source Justification (PDF Fallback Merge):** {gtm_ai_selection_result['justification']}")
-                            
-                            raw_gtm_content = {"title": "", "body": ""}
-                            if gtm_ai_selection_result["slide"]:
-                                full_text = gtm_ai_selection_result["slide"].get("text", "")
-                                lines = full_text.split('\n')
-                                raw_gtm_content["title"] = lines[0] if lines else ""
-                                raw_gtm_content["body"] = "\n".join(lines[1:]) if len(lines) > 1 else ""
-
-                            ai_mapping_result = analyze_and_map_content(
-                                api_key, 
-                                raw_gtm_content,
-                                all_template_slides_for_ai, 
-                                keyword
-                            )
-                            log_entry["log"].append(f"**AI Template Mapping Justification (PDF Fallback Merge):** {ai_mapping_result['justification']}")
-
-                            selected_template_index = ai_mapping_result["best_template_index"]
-                            processed_content = ai_mapping_result["processed_content"]
-
-                            if selected_template_index != -1 and selected_template_index < len(new_prs.slides):
-                                populate_slide(dest_slide, processed_content)
-                                log_entry["log"].append(f"**Action:** Merged processed content from GTM (PDF) page {gtm_ai_selection_result['index'] + 1} into Template slide {current_dest_slide_index + 1}, with regional placeholders. AI suggested template type from template index {selected_template_index + 1}.")
-                            else:
-                                log_entry["log"].append("**Action:** AI could not determine a suitable template layout or process content for PDF. Template slide was left as is.")
-
-                    elif action == "Merge: Template Layout + GTM Content":
-                        gtm_ai_selection_result = find_slide_by_ai(api_key, gtm_file_bytes, gtm_file_type, keyword, "GTM Deck (Content Source)")
-                        log_entry["log"].append(f"**GTM Content Source Justification:** {gtm_ai_selection_result['justification']}")
-                        
-                        raw_gtm_content = {"title": "", "body": ""}
-                        if gtm_ai_selection_result["slide"]:
-                            full_text = gtm_ai_selection_result["slide"].get("text", "")
-                            lines = full_text.split('\n')
-                            raw_gtm_content["title"] = lines[0] if lines else ""
-                            raw_gtm_content["body"] = "\n".join(lines[1:]) if len(lines) > 1 else ""
-
-                        ai_mapping_result = analyze_and_map_content(
-                            api_key, 
-                            raw_gtm_content,
-                            all_template_slides_for_ai, 
-                            keyword
-                        )
-                        log_entry["log"].append(f"**AI Template Mapping Justification:** {ai_mapping_result['justification']}")
-
-                        selected_template_index = ai_mapping_result["best_template_index"]
-                        processed_content = ai_mapping_result["processed_content"]
-
-                        if selected_template_index != -1 and selected_template_index < len(new_prs.slides):
-                            populate_slide(dest_slide, processed_content)
-                            log_entry["log"].append(f"**Action:** Merged processed content from GTM ({gtm_file_to_process.name}) page/slide {gtm_ai_selection_result['index'] + 1} into Template slide {current_dest_slide_index + 1}, with regional placeholders. AI suggested template type from template index {selected_template_index + 1}.")
+                        # Find the best matching slide in the GTM deck using AI
+                        result = find_slide_by_ai(api_key, gtm_prs, keyword, "GTM Deck")
+                        log_entry["log"].append(f"**GTM Content Choice Justification:** {result['justification']}")
+                        if result["slide"]:
+                            # If a suitable slide is found, deep copy its content to the destination slide
+                            deep_copy_slide_content(dest_slide, result["slide"])
+                            log_entry["log"].append(f"**Action:** Replaced Template slide {i + 1} with content from GTM slide {result['index'] + 1}.")
                         else:
-                            log_entry["log"].append("**Action:** AI could not determine a suitable template layout or process content. Template slide was left as is.")
+                            log_entry["log"].append("**Action:** No suitable slide found in GTM deck. Template slide was left as is.")
                     
-                    process_log.append(log_entry)
+                    elif action == "Merge: Template Layout + GTM Content":
+                        # Find the best matching slide for content in the GTM deck using AI
+                        content_result = find_slide_by_ai(api_key, gtm_prs, keyword, "GTM Deck")
+                        log_entry["log"].append(f"**GTM Content Choice Justification:** {content_result['justification']}")
+                        if content_result["slide"]:
+                            # If content slide found, extract its title and body
+                            content = get_slide_content(content_result["slide"])
+                            # Populate the destination slide (template layout) with the extracted content
+                            populate_slide(dest_slide, content)
+                            log_entry["log"].append(f"**Action:** Merged content from GTM slide {content_result['index'] + 1} into Template slide {i+1}.")
+                        else:
+                             log_entry["log"].append("**Action:** No suitable content found in GTM deck. Template slide was left as is.")
+                    
+                    process_log.append(log_entry) # Add step log to overall process log
  
                 st.success("Successfully built the new presentation structure.")
                 
                 st.write("Step 3/3: Finalizing...")
-                st.subheader("📋 Process Log")
+                st.subheader("📋 Process Log") # Changed emoji for process log
+                # Display the process log in an expandable format
                 for entry in process_log:
                     with st.expander(f"Step {entry['step']}: '{entry['keyword']}' ({entry['action']})"):
                         for line in entry['log']: 
                             st.markdown(f"- {line}")
                 
+                # Save the assembled presentation to an in-memory buffer
                 output_buffer = io.BytesIO()
                 new_prs.save(output_buffer)
-                output_buffer.seek(0)
+                output_buffer.seek(0) # Rewind the buffer to the beginning for downloading
 
-                st.success("✨ Your new regional presentation has been assembled!")
+                st.success("✨ Your new regional presentation has been assembled!") # Changed emoji for success
+                # Provide a download button for the user
                 st.download_button(
                     "Download Assembled PowerPoint", 
                     data=output_buffer, 
@@ -599,7 +355,7 @@ if template_files and gtm_files and api_key and st.session_state.structure:
                 )
             except Exception as e:
                 st.error(f"A critical error occurred: {e}")
-                st.exception(e)
+                st.exception(e) # Display full traceback for debugging
 else:
-    st.info("Please provide an API Key, upload at least one Template Deck (PPTX or PDF) and a GTM Global Deck (PPTX or PDF), and define the structure in the sidebar to begin.")
-
+    # Instructions displayed when inputs are not yet complete
+    st.info("Please provide an API Key, upload at least one Template Deck and a GTM Deck, and define the structure in the sidebar to begin.")
