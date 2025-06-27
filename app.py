@@ -154,7 +154,7 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                         rId = new_prs.slides._sldIdLst[i].rId
                         new_prs.part.drop_rel(rId)
                         del new_prs.slides._sldIdLst[i]
-
+ 
                 st.success("Successfully built the new presentation structure.")
                 
                 st.write("Step 3/3: Finalizing...")
