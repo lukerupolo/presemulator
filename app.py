@@ -141,6 +141,7 @@ st.set_page_config(page_title="AI Presentation Pruner & Editor", layout="wide")
 st.title("🤖 AI Presentation Pruner & Editor")
 st.write("This tool automatically identifies and keeps only 'Objectives' and 'Timeline' slides, then intelligently adapts the timeline content for regional responses.")
 
+# CORRECTED: The sidebar now only contains the API key input and the file uploader.
 with st.sidebar:
     st.header("Controls")
     api_key = st.text_input("Enter your OpenAI API Key", type="password")
@@ -157,14 +158,12 @@ if uploaded_file is not None:
                     file_content = uploaded_file.getvalue()
                     prs = Presentation(io.BytesIO(file_content))
                     
-                    # 1. Classify all slides
                     st.write("Step 1/5: Analyzing and classifying all slides...")
                     slides_text_for_classification = [{"slide_number": i+1, "text": extract_text_from_slide(s)} for i, s in enumerate(prs.slides)]
                     classifications = classify_slides(api_key, slides_text_for_classification)
                     
                     if not classifications: raise ValueError("Could not classify slides.")
 
-                    # 2. Identify slides to delete and prepare for summary
                     st.write("Step 2/5: Pruning presentation based on classification...")
                     indices_to_delete = []
                     kept_slides_info = []
@@ -182,8 +181,6 @@ if uploaded_file is not None:
                     delete_slides(prs, indices_to_delete)
                     st.write(f"Kept {len(kept_slides_info)} slide(s) and deleted {len(indices_to_delete)} slide(s).")
 
-
-                    # 3. Process remaining slides
                     st.write("Step 3/5: Adapting content for kept slides...")
                     summary_data = []
                     final_slides = prs.slides
@@ -198,7 +195,6 @@ if uploaded_file is not None:
                         elif slide_info["classification"] == "Timeline":
                             modified_content = get_ai_modified_timeline_content(api_key, current_content)
 
-                        # Update the presentation object
                         title_shape, body_shape = find_title_and_body_shapes(final_slides[i])
                         if title_shape: preserve_and_set_text(title_shape.text_frame, modified_content.get('title', ''))
                         if body_shape: preserve_and_set_text(body_shape.text_frame, modified_content.get('body', ''))
