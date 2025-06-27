@@ -34,9 +34,9 @@ def parse_pptx(path: str) -> dict:
                 continue
             full_text = ''.join(run.text for p in tf.paragraphs for run in p.runs)
             font_info = {'name': None, 'size': None, 'bold': False, 'italic': False}
-            first_run = tf.paragraphs[0].runs[0] if tf.paragraphs and tf.paragraphs[0].runs else None
-            if first_run:
-                font = first_run.font
+            runs = tf.paragraphs[0].runs if tf.paragraphs else []
+            if runs:
+                font = runs[0].font
                 font_info = {
                     'name': font.name,
                     'size': font.size.pt if font.size else None,
@@ -85,17 +85,15 @@ def run_generated_code(code: str) -> str:
     Captures and surfaces errors from execution.
     """
     with tempfile.TemporaryDirectory() as tmp:
-        script = os.path.join(tmp, 'gen.py')
-        with open(script, 'w') as f:
+        script_path = os.path.join(tmp, 'gen.py')
+        with open(script_path, 'w') as f:
             f.write(code)
         try:
-            # Capture stdout/stderr
             result = subprocess.run(
-                ['python', script], cwd=tmp,
+                ['python', script_path], cwd=tmp,
                 capture_output=True, text=True, check=True
             )
         except subprocess.CalledProcessError as e:
-            # Show error logs in Streamlit
             st.error("Error executing generated code:")
             st.code(e.stderr)
             raise
@@ -141,7 +139,7 @@ if uploaded:
         st.success("Done! Download below:")
         data = open(out_file, 'rb').read()
         st.download_button(
-            "Download PPTX",Q
+            "Download PPTX",
             data=data,
             file_name="recreated.pptx",
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
