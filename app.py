@@ -140,21 +140,21 @@ def display_summary(original_data, modified_data):
     
     for original, modified in zip(original_data, modified_data):
         st.markdown(f"---")
-        st.markdown(f"### Slide {original['slide_number']}")
+        # FIX: Always use 'original' dictionary to get the slide_number, as the 'modified' one doesn't have it.
+        slide_num = original['slide_number']
+        st.markdown(f"### Slide {slide_num}")
         
         col1, col2 = st.columns(2)
         
         with col1:
             st.markdown("**Before**")
-            # FIX: Increased height from 50 to 70 to meet Streamlit requirements
-            st.text_area("Title", value=original['title'], height=70, disabled=True, key=f"orig_title_{original['slide_number']}")
-            st.text_area("Body", value=original['body'], height=200, disabled=True, key=f"orig_body_{original['slide_number']}")
+            st.text_area("Title", value=original['title'], height=70, disabled=True, key=f"orig_title_{slide_num}")
+            st.text_area("Body", value=original['body'], height=200, disabled=True, key=f"orig_body_{slide_num}")
 
         with col2:
             st.markdown("**After**")
-            # FIX: Increased height from 50 to 70 to meet Streamlit requirements
-            st.text_area("Title", value=modified['title'], height=70, disabled=True, key=f"mod_title_{modified['slide_number']}")
-            st.text_area("Body", value=modified['body'], height=200, disabled=True, key=f"mod_body_{modified['slide_number']}")
+            st.text_area("Title", value=modified['title'], height=70, disabled=True, key=f"mod_title_{slide_num}")
+            st.text_area("Body", value=modified['body'], height=200, disabled=True, key=f"mod_body_{slide_num}")
 
 # --- Streamlit App ---
 
