@@ -283,28 +283,33 @@ def analyze_and_map_content(api_key, gtm_slide_content, template_slides_summary,
 
     client = openai.OpenAI(api_key=api_key)
 
+    # --- UPDATED SYSTEM PROMPT FOR THOROUGH TEMPLATE SELECTION ---
     system_prompt = f"""
-    You are an expert presentation content mapper. Your task is to help a user
-    integrate content from a Global (GTM) slide into a regional template.
+    You are an expert presentation content mapper. Your primary task is to help a user
+    integrate content from a Global (GTM) slide into the most appropriate regional template.
 
-    Given the GTM slide content and summaries of available template slides,
-    you must perform two key tasks:
-    1.  **Select the Best Template:** Identify the most suitable template slide
-        (by its index) from `template_slides_summary` that would best house
-        the provided `gtm_slide_content`. Consider the structure and typical
-        purpose of template slides.
-    2.  **Process GTM Content for Regionalization:** Analyze the `gtm_slide_content`.
-        Identify any parts of the text that are likely to be *regional-specific*
-        (e.g., local market data, specific regional initiatives, detailed local performance
-        figures, regional names, or examples relevant only to one region).
-        For these regional-specific parts, replace them with a concise, generic
-        placeholder like `[REGIONAL DATA HERE]`, `[LOCAL EXAMPLE]`, `[Qx REGIONAL METRICS]`.
-        The goal is to provide a global baseline with clear markers for regional teams to fill in.
-        Maintain the original overall structure of the text.
+    Given the `gtm_slide_content` and a list of `template_slides_summary` (each with an index and text content),
+    you must perform two critical tasks:
+
+    1.  **Select the BEST Template:**
+        * **Crucially, you must review *each and every* template slide summary provided.**
+        * Semantically evaluate which template slide's structure and implied purpose (based on its textual summary) would *best* accommodate the `gtm_slide_content`.
+        * **Perform a comparative analysis:** Do not just pick the first decent match. Compare all options to find the single most suitable template.
+        * Consider factors like:
+            * Does the template layout (implied by its text content) match the theme/type of the GTM content (e.g., if GTM content is about objectives, find an objectives-like template).
+            * Is there sufficient space or logical sections in the template for the GTM content?
+            * Is the template visually appropriate for the content's nature (e.g., if GTM content is a timeline, is there a template with timeline-like textual elements)?
+
+    2.  **Process GTM Content for Regionalization:**
+        * Analyze the `gtm_slide_content` (title and body).
+        * Identify any parts of the text that are highly likely to be *regional-specific* (e.g., local market data, specific regional initiatives, detailed local performance figures, regional names, or examples relevant only to one region).
+        * For these regional-specific parts, replace them with a concise, generic placeholder like `[REGIONAL DATA HERE]`, `[LOCAL EXAMPLE]`, `[Qx REGIONAL METRICS]`, `[REGIONAL IMPACT]`, `[LOCAL TEAM]`, etc. Be intelligent about the placeholder text.
+        * The goal is to provide a global baseline with clear, actionable markers for regional teams to fill in.
+        * Maintain the original overall structure, headings, and flow of the text where possible.
 
     You MUST return a JSON object with the following keys:
-    -   `best_template_index`: An integer representing the index of the best template slide.
-    -   `justification`: A brief, one-sentence justification for choosing that template.
+    -   `best_template_index`: An integer representing the index of the best template slide from the `template_slides_summary` list.
+    -   `justification`: A brief, one-sentence justification for choosing that template, explicitly mentioning why it's better than other contenders if applicable.
     -   `processed_content`: An object with 'title' and 'body' keys, containing the
         GTM content with regional placeholders inserted.
     """
@@ -550,32 +555,14 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                             processed_content = ai_mapping_result["processed_content"]
 
                             if selected_template_index != -1 and selected_template_index < len(new_prs.slides):
-                                # The AI selected a different template slide for this content.
-                                # We need to use that selected slide as the destination.
-                                # If the selected template index is different from current_dest_slide_index (i),
-                                # this means we are mapping content from GTM slide X to template slide Y,
-                                # where Y is not necessarily the 'i-th' slide. This requires advanced reordering
-                                # or replacing the 'i-th' slide with the selected template slide's content.
-                                # For simplicity, let's assume the template_files[0] has enough slides and we
-                                # are just populating into the *designated* slide at index `i` of the output `new_prs`.
-                                # The AI's `best_template_index` here refers to the index within the *original* template deck.
-                                # To populate, we must use the slide at `i` in `new_prs`.
-                                # The AI's role is to adapt content to a *generic* template layout, not to pick a specific slide index for the output deck.
-                                # The current design iterates through `new_prs.slides` and processes `step[i]`.
-                                # So, the `best_template_index` from `analyze_and_map_content` can tell us *which template layout style* is best,
-                                # but we still populate into `dest_slide` (which is `new_prs.slides[i]`).
-                                # This is a conceptual clarification for how the AI's template selection impacts direct slide replacement vs. content merge.
-
-                                # For 'Merge', the *layout* comes from the current `dest_slide` (new_prs.slides[i]).
-                                # The AI's role here is *not* to change which slide in `new_prs` we're working on,
-                                # but to process the GTM content for the *existing layout*.
-                                # The `best_template_index` becomes more of a 'suggestion' for *which type of layout* the content fits.
-                                # Given the current code structure, we still populate `dest_slide` (new_prs.slides[i]).
-                                # The AI-processed content handles the 'best fit' to layout by modifying the content itself.
+                                # The AI selected a preferred template index. While we still populate the slide at `i` in the output,
+                                # the AI's selection process for `best_template_index` is now more robust.
+                                # The `populate_slide` function is designed to work with the *current* `dest_slide` (new_prs.slides[i]).
+                                # The AI's `best_template_index` helps ensure the *content* is processed to best fit *a* template type.
 
                                 # Populate the current destination slide with the processed content
                                 populate_slide(dest_slide, processed_content)
-                                log_entry["log"].append(f"**Action:** Merged processed content from GTM slide {gtm_content_source_result['index'] + 1} into Template slide {current_dest_slide_index + 1}, with regional placeholders.")
+                                log_entry["log"].append(f"**Action:** Merged processed content from GTM slide {gtm_content_source_result['index'] + 1} into Template slide {current_dest_slide_index + 1}, with regional placeholders. AI suggested template type at index {selected_template_index + 1}.")
                             else:
                                 log_entry["log"].append("**Action:** AI could not determine a suitable template layout or process content. Template slide was left as is.")
                         else:
