@@ -14,6 +14,8 @@ def clone_slide(pres, slide_to_clone):
     src_part = slide_to_clone.part
     package = pres.part.package
     
+    # Using get_or_create_part is more robust for handling parts that might already exist
+    # when cloning multiple slides that share resources like images.
     new_part = package.get_or_create_part(
         src_part.partname, src_part.content_type, src_part.blob
     )
@@ -79,7 +81,6 @@ def find_slide_by_ai(api_key, prs, slide_type_prompt):
 def get_slide_content(slide):
     """Extracts title and body text from a slide."""
     title, body = "", ""
-    # Simple heuristic for title (often the highest text box)
     text_boxes = sorted([s for s in slide.shapes if s.has_text_frame and s.text.strip()], key=lambda s: s.top)
     if text_boxes:
         title = text_boxes[0].text
@@ -89,7 +90,6 @@ def get_slide_content(slide):
 
 def populate_slide(slide, content):
     """Populates a slide's placeholders with new content, making it bold."""
-    # Find title and body placeholders by position
     text_boxes = sorted([s for s in slide.shapes if s.has_text_frame], key=lambda s: s.top)
     if not text_boxes: return
 
@@ -140,7 +140,7 @@ with st.sidebar:
     st.button("Add New Step", on_click=add_step, use_container_width=True)
 
     for i, step in enumerate(st.session_state.structure):
-        with st.container():
+        with st.container(border=True):
             st.markdown(f"**Step {i+1}**")
             cols = st.columns([3, 3, 1])
             step["keyword"] = cols[0].text_input("Slide Type (e.g., 'Objectives')", value=step["keyword"], key=f"keyword_{step['id']}")
@@ -160,13 +160,18 @@ if template_files and gtm_file and api_key:
         if st.button("🚀 Assemble Presentation", type="primary"):
             with st.spinner("Assembling your new presentation..."):
                 try:
-                    st.write("Step 1/3: Loading decks...")
+                    st.write("Step 1/3: Loading decks and preparing a clean base...")
                     template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
                     gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
                     
-                    new_prs = Presentation()
-                    new_prs.slide_width = template_prs_list[0].slide_width
-                    new_prs.slide_height = template_prs_list[0].slide_height
+                    # CRITICAL FIX: Use the first template as the base for the new presentation.
+                    new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
+                    # And then delete all its slides to create a clean, valid canvas
+                    for i in range(len(new_prs.slides) - 1, -1, -1):
+                        rId = new_prs.slides._sldIdLst[i].rId
+                        new_prs.part.drop_rel(rId)
+                        del new_prs.slides._sldIdLst[i]
+
 
                     st.write("Step 2/3: Building presentation from your structure...")
                     for i, step in enumerate(st.session_state.structure):
@@ -183,7 +188,8 @@ if template_files and gtm_file and api_key:
                                 st.warning(f"  - AI could not find a '{keyword}' slide in GTM deck. Skipping.")
                         
                         elif action == "Merge: Template Layout + GTM Content":
-                            layout_slide = find_slide_by_ai(api_key, template_prs_list[0], keyword) # Assuming one template for now for simplicity
+                            # Use the first template as the source for layouts for this merge operation.
+                            layout_slide = find_slide_by_ai(api_key, template_prs_list[0], keyword)
                             content_slide = find_slide_by_ai(api_key, gtm_prs, keyword)
 
                             if layout_slide and content_slide:
