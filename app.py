@@ -47,6 +47,15 @@ def find_slide_by_title(prs, title_keyword):
                     return slide
     return None
 
+def find_slide_in_templates(template_prs_list, title_keyword):
+    """Searches through a list of template presentations to find the first matching slide."""
+    for prs in template_prs_list:
+        slide = find_slide_by_title(prs, title_keyword)
+        if slide:
+            return slide
+    return None
+
+
 def get_slide_content(slide):
     """Extracts title and body text from a slide."""
     title, body = "", ""
@@ -104,9 +113,11 @@ if 'structure' not in st.session_state:
 # --- UI Sidebar ---
 with st.sidebar:
     st.header("1. Upload Your Decks")
-    template_file = st.file_uploader(
-        "Upload Template Deck (.pptx)",
+    # UPDATED: accept_multiple_files is now True
+    template_files = st.file_uploader(
+        "Upload Template Deck(s) (.pptx)",
         type=["pptx"],
+        accept_multiple_files=True, # Allows multiple template files
         help="The 'slide bank' with approved layouts."
     )
     gtm_file = st.file_uploader(
@@ -146,19 +157,21 @@ with st.sidebar:
 
 
 # --- Main Content Area ---
-if template_file and gtm_file:
+if template_files and gtm_file:
     if st.session_state.structure:
         if st.button("🚀 Assemble Presentation", type="primary"):
             with st.spinner("Assembling your new presentation..."):
                 try:
                     # --- Step 1: Load decks ---
                     st.write("Step 1/3: Loading and analyzing decks...")
-                    template_prs = Presentation(io.BytesIO(template_file.getvalue()))
+                    # UPDATED: Creates a list of presentation objects from all uploaded template files
+                    template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
                     gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
                     
                     new_prs = Presentation()
-                    new_prs.slide_width = template_prs.slide_width
-                    new_prs.slide_height = template_prs.slide_height
+                    # Use the first template to set the slide size for the new presentation
+                    new_prs.slide_width = template_prs_list[0].slide_width
+                    new_prs.slide_height = template_prs_list[0].slide_height
 
                     # --- Step 2: Iterate through the user-defined structure ---
                     st.write("Step 2/3: Building new presentation from your defined structure...")
@@ -175,7 +188,8 @@ if template_file and gtm_file:
                                 st.warning(f"  - Could not find a slide with keyword '{keyword}' in the GTM deck. Skipping.")
                         
                         elif action == "Merge: Template Layout + GTM Content":
-                            layout_slide = find_slide_by_title(template_prs, keyword)
+                            # UPDATED: Searches through ALL templates
+                            layout_slide = find_slide_in_templates(template_prs_list, keyword)
                             content_slide = find_slide_by_title(gtm_prs, keyword)
 
                             if layout_slide and content_slide:
@@ -183,7 +197,8 @@ if template_file and gtm_file:
                                 new_slide = clone_slide(new_prs, layout_slide)
                                 populate_slide(new_slide, content)
                             else:
-                                if not layout_slide: st.warning(f"  - Could not find layout for '{keyword}' in Template. Skipping.")
+
+                                if not layout_slide: st.warning(f"  - Could not find layout for '{keyword}' in any Template. Skipping.")
                                 if not content_slide: st.warning(f"  - Could not find content for '{keyword}' in GTM Deck. Skipping.")
                     
                     st.success("Successfully built the new presentation structure.")
@@ -208,5 +223,5 @@ if template_file and gtm_file:
     else:
         st.info("Define the presentation structure in the sidebar to begin.")
 else:
-    st.info("Please upload both a Template Deck and a GTM Global Deck to begin.")
+    st.info("Please upload both the GTM Global Deck and at least one Template Deck to begin.")
 
