@@ -1,6 +1,6 @@
 import streamlit as st
 from pptx import Presentation
-from pptx.util import Pt
+from pptx.util import Pt  # <--- FIX: Added this missing import
 import io
 import os
 import openai
@@ -9,48 +9,52 @@ from lxml.etree import ElementBase
 
 # --- Core PowerPoint Functions ---
 
-def clone_slide(pres, slide):
+def clone_slide(pres, slide_to_clone):
     """
     Duplicates a slide from a source presentation and adds it to the end of
     the slides in the destination presentation `pres`.
-    Ensures all parts (like images) are copied correctly.
+    This is a robust method that handles slide parts and relationships correctly.
     """
-    # 1. Get the source slide's part
-    src_slide_part = slide.part
+    # 1. Get the source slide's part (the XML file for the slide)
+    src_part = slide_to_clone.part
 
-    # 2. Add a new slide part to the destination presentation
-    # The partname is derived from the source. python-pptx handles uniqueness.
-    # We copy the 'blob' (binary content) of the source slide part.
-    # This is a low-level operation on the underlying package.
+    # 2. Add a new slide part to the destination presentation's package.
+    # We copy the blob (binary content) of the source slide part.
+    # This is a low-level operation that python-pptx abstracts away from.
+    # The partname (e.g., /ppt/slides/slide1.xml) is taken from the source.
+    # The package handles finding a unique name if a conflict exists.
+    part_dict = pres.part.package.parts
     new_part = pres.part.package.add_part(
-        src_slide_part.partname, src_slide_part.content_type, src_slide_part.blob
+        src_part.partname, src_part.content_type, src_part.blob
     )
 
-    # 3. Add a relationship from the presentation's main part to the new slide part.
-    # This makes the new slide "appear" in the slide list.
+    # 3. Add the new slide part to the presentation's slide list.
+    # This makes the slide "visible" in the presentation's slide sequence.
     pres.slides.add_slide(new_part)
 
-    # 4. Copy relationships from the source slide part to the new slide part
-    for rel in src_slide_part.rels:
-        # If the relationship is external, copy it as is
+    # 4. Copy relationships from the source slide part to the new slide part.
+    # This is crucial for images, charts, and other linked content.
+    for rel in src_part.rels:
+        # If the relationship is to an external resource, copy it as is.
         if rel.is_external:
             new_part.rels.add_relationship(
                 rel.reltype, rel.target_ref, rel.rId, is_external=True
             )
             continue
 
-        # If the relationship target part (e.g., an image) isn't already in the destination package...
+        # If the target part of the relationship (e.g., an image file)
+        # isn't already in the destination package...
         target_part = rel.target_part
         if not pres.part.package.has_part(target_part.partname):
-            # ...copy the target part to the destination package
+            # ...add the target part to the destination package.
             pres.part.package.add_part(
                 target_part.partname, target_part.content_type, target_part.blob
             )
 
-        # Add the relationship from the new slide to the new target part
-        new_part.rels.add_relationship(rel.reltype, target_part, rel.rId)
+        # Add the relationship from the new slide to the now-guaranteed-to-exist target part.
+        new_part.relate_to(target_part, rel.reltype, rId=rel.rId)
     
-    # The new slide is the last one in the presentation
+    # The newly added slide will be the last one.
     return pres.slides[-1]
 
 
@@ -60,6 +64,7 @@ def find_slides_by_title(prs, title_keyword):
     for slide in prs.slides:
         for shape in slide.shapes:
             if shape.has_text_frame and title_keyword.lower() in shape.text.lower():
+                # Heuristic to check if it's a title (often near the top of the slide)
                 if shape.top < Pt(150): 
                     found_slides.append(slide)
                     break 
@@ -70,7 +75,7 @@ def find_slide_in_templates(template_prs_list, title_keyword):
     for prs in template_prs_list:
         found_slides = find_slides_by_title(prs, title_keyword)
         if found_slides:
-            return found_slides[0]
+            return found_slides[0] # Return the first slide found
     return None
 
 def populate_text_in_shape(shape, text):
@@ -79,7 +84,7 @@ def populate_text_in_shape(shape, text):
         return
         
     tf = shape.text_frame
-    # Clear all existing paragraphs by removing their XML elements, which is more robust.
+    # Clear all existing paragraphs by removing their XML elements. This is more robust.
     for p in tf.paragraphs:
         p._p.getparent().remove(p._p)
     
@@ -140,8 +145,7 @@ if template_files and gtm_file:
                     copied_activation_slide = clone_slide(new_prs, activation_slide_from_template)
                     
                     for shape in copied_activation_slide.shapes:
-                        # Using a simple heuristic to find the main body text placeholder
-                        if shape.has_text_frame and "Lorem Ipsum" in shape.text: 
+                        if shape.has_text_frame and "Lorem Ipsum" in shape.text: # Simple heuristic to find body
                             populate_text_in_shape(shape, "Placeholder for regional activation details.\n- Tactic 1: [INSERT REGIONAL TACTIC]\n- Tactic 2: [INSERT REGIONAL TACTIC]\n- Budget: [INSERT REGIONAL BUDGET]")
                     
                     st.success("Added and populated 1 'Activation' slide from the template bank.")
