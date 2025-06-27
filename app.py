@@ -6,13 +6,16 @@ import copy
 import uuid
 import openai
 import json
+import requests
+from lxml.etree import QName
 
 # --- Core PowerPoint Functions ---
 
-def deep_copy_slide(dest_slide, src_slide):
+def deep_copy_slide(dest_pres, dest_slide, src_slide):
     """
     Performs a stable, deep copy of all shapes and content from a source slide
     to a destination slide. This is the most robust method for "Copy from GTM".
+    It now handles linked images by downloading and embedding them.
     """
     # Clear all shapes from the destination slide first to prepare it.
     for shape in list(dest_slide.shapes):
@@ -21,6 +24,24 @@ def deep_copy_slide(dest_slide, src_slide):
 
     # Iterate through shapes in the source slide and copy them to the destination.
     for shape in src_slide.shapes:
+        # If it's a linked picture, we need to download and embed it.
+        if shape.shape_type == 13 and hasattr(shape, 'image'): # 13 is the shape type for Picture
+            # This is a heuristic to identify linked pictures. A more robust solution might
+            # need to parse XML to find the external relationship ID.
+            try:
+                # Get the URL of the linked image
+                image_url = shape.image.ext_uri
+                response = requests.get(image_url, stream=True)
+                response.raise_for_status()
+                image_stream = io.BytesIO(response.content)
+                # Add the downloaded image to the destination slide
+                dest_slide.shapes.add_picture(image_stream, shape.left, shape.top, width=shape.width, height=shape.height)
+                continue # Skip the generic element copy
+            except (AttributeError, requests.exceptions.RequestException):
+                # Fallback for embedded images or if download fails
+                pass
+        
+        # For all other shapes (or fallback), copy the element
         new_el = copy.deepcopy(shape.element)
         dest_slide.shapes._spTree.insert_element_before(new_el, 'p:extLst')
 
@@ -66,17 +87,12 @@ def populate_slide(slide, content):
     replacing text in existing runs.
     """
     title_populated, body_populated = False, False
-
-    # A more robust way to find title and body placeholders
     for shape in slide.shapes:
-        if not shape.has_text_frame:
-            continue
+        if not shape.has_text_frame: continue
         
-        # --- FIX: Check if it IS a placeholder before checking its type ---
         is_placeholder = shape.is_placeholder
         
-        # Heuristic for Title placeholder
-        if not title_populated and ( (is_placeholder and shape.placeholder_format.type in ('TITLE', 'CENTER_TITLE')) or (not is_placeholder and shape.top < Pt(150)) ):
+        if not title_populated and ((is_placeholder and shape.placeholder_format.type in ('TITLE', 'CENTER_TITLE')) or (not is_placeholder and shape.top < Pt(150))):
             tf = shape.text_frame
             tf.clear()
             p = tf.paragraphs[0]
@@ -85,8 +101,7 @@ def populate_slide(slide, content):
             run.font.bold = True
             title_populated = True
 
-        # Heuristic for Body placeholder
-        elif not body_populated and ( (is_placeholder and shape.placeholder_format.type in ('BODY', 'OBJECT')) or "lorem ipsum" in shape.text.lower()):
+        elif not body_populated and ((is_placeholder and shape.placeholder_format.type in ('BODY', 'OBJECT')) or "lorem ipsum" in shape.text.lower()):
             tf = shape.text_frame
             tf.clear()
             p = tf.paragraphs[0]
@@ -94,7 +109,6 @@ def populate_slide(slide, content):
             run.text = content.get("body", "")
             run.font.bold = True
             body_populated = True
-
 
 # --- Streamlit App ---
 st.set_page_config(page_title="Dynamic AI Presentation Assembler", layout="wide")
@@ -135,19 +149,16 @@ if template_files and gtm_file and api_key and st.session_state.structure:
         with st.spinner("Assembling your new presentation... This may take a moment."):
             try:
                 st.write("Step 1/3: Loading decks...")
-                # Use the first uploaded template as the base for the new presentation
                 new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
                 gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
                 
                 st.write("Step 2/3: Building new presentation from your structure...")
                 
                 if len(st.session_state.structure) != len(new_prs.slides):
-                    st.warning(f"Warning: Your defined structure has {len(st.session_state.structure)} steps, but the template has {len(new_prs.slides)} slides. The output will match the template's slide count.")
+                    st.warning(f"Warning: Your structure has {len(st.session_state.structure)} steps, but the template has {len(new_prs.slides)} slides. Output will match the template's slide count.")
 
-                # Iterate through the slides of the new presentation (which is a copy of the template)
                 for i, dest_slide in enumerate(new_prs.slides):
-                    if i >= len(st.session_state.structure):
-                        break 
+                    if i >= len(st.session_state.structure): break 
                     
                     step = st.session_state.structure[i]
                     keyword = step["keyword"]
@@ -157,7 +168,7 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                     if action == "Copy from GTM (as is)":
                         src_slide = find_slide_by_ai(api_key, gtm_prs, keyword)
                         if src_slide:
-                            deep_copy_slide(dest_slide, src_slide)
+                            deep_copy_slide(new_prs, dest_slide, src_slide)
                             st.success(f"  - Deep copied content for '{keyword}'.")
                         else:
                             st.warning(f"  - AI could not find '{keyword}' in GTM Deck. Leaving template slide as is.")
