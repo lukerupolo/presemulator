@@ -6,6 +6,7 @@ import copy
 import uuid
 import openai
 import json
+from lxml import etree
 
 # --- Core PowerPoint Functions ---
 
@@ -14,32 +15,42 @@ def clone_slide(pres, slide_to_clone):
     Duplicates a slide from a source presentation and adds it to the end of
     the slides in the destination presentation `pres`. This is the most robust method.
     """
-    src_part = slide_to_clone.part
-    package = pres.part.package
+    # 1. Create a dictionary to map relationship IDs from the source to the target
+    rId_map = {}
     
-    # get_or_create_part is a safe way to copy the slide's XML data
-    new_part = package.get_or_create_part(
-        src_part.partname, src_part.content_type, src_part.blob
-    )
-    # Add the slide to the presentation's slide list
-    pres.slides.add_slide(new_part)
-
-    # Copy relationships (critical for images)
-    for rel in src_part.rels:
+    # 2. Iterate through the relationships of the source slide
+    for r in slide_to_clone.part.rels:
+        rel = slide_to_clone.part.rels[r]
+        # If the relationship is to an external resource (like a hyperlink), skip it
         if rel.is_external:
-            new_part.rels.add_relationship(
-                rel.reltype, rel.target_ref, rel.rId, is_external=True
-            )
             continue
         
+        # Get the target part of the relationship (e.g., an image)
         target_part = rel.target_part
-        if not package.has_part(target_part.partname):
-            package.get_or_create_part(
-                target_part.partname, target_part.content_type, target_part.blob
-            )
-        new_part.relate_to(target_part, rel.reltype, rId=rel.rId)
+        # Add the target part to the destination presentation's package
+        # This will handle images, charts, etc., ensuring they are available for the new slide
+        pres.part.package.get_part(target_part.partname)
+        
+        # Store the relationship ID mapping
+        rId_map[rel.rId] = rel.rId
 
-    return pres.slides[-1]
+    # 3. Create a new blank slide in the destination presentation
+    # We use a blank layout (usually index 6) as a starting point
+    blank_slide_layout = pres.slide_layouts[6]
+    new_slide = pres.slides.add_slide(blank_slide_layout)
+    
+    # 4. Replace the content of the new blank slide with the content of the slide to clone
+    # This is done by directly manipulating the underlying XML elements
+    new_slide.shapes.element.getparent().replace(new_slide.shapes.element, slide_to_clone.shapes.element)
+    
+    # 5. Copy the background from the source slide to the new slide
+    if slide_to_clone.has_notes_slide:
+        new_slide.has_notes_slide
+        notes_slide = new_slide.notes_slide
+        notes_slide.notes_text_frame.text = slide_to_clone.notes_slide.notes_text_frame.text
+
+    return new_slide
+
 
 def find_slide_by_ai(api_key, prs, slide_type_prompt):
     """
@@ -51,11 +62,15 @@ def find_slide_by_ai(api_key, prs, slide_type_prompt):
     slides_content = [{"slide_index": i, "text": " ".join(s.text for s in slide.shapes if s.has_text_frame)[:1000]} for i, slide in enumerate(prs.slides)]
 
     system_prompt = f"""
-    You are a presentation analyst. Given a JSON list of slide contents and a description of a slide type ('{slide_type_prompt}'), identify the index of the single best-matching slide.
-    Analyze the text for purpose (e.g., a "Timeline" has dates or phases; "Objectives" has goal language).
-    Return a JSON object with a single key 'best_match_index'. If no good match is found, return -1.
+    You are an expert presentation analyst. You will be given a JSON list of slide contents and a user's description of a slide type.
+    Your task is to identify the index of the single best-matching slide from the list.
+    The user is looking for a slide that represents: '{slide_type_prompt}'.
+    Analyze the text of each slide to understand its purpose. For example, a "Timeline" might contain dates, quarters, or sequential phases. "Objectives" might contain goal-oriented language.
+    You MUST return a JSON object with a single key 'best_match_index', which is the integer index of the best-matching slide.
+    If no suitable slide is found, return -1.
     """
-    full_user_prompt = f"Find the best slide for '{slide_type_prompt}' in: {json.dumps(slides_content, indent=2)}"
+
+    full_user_prompt = f"Find the best slide for '{slide_type_prompt}' in the following content:\n{json.dumps(slides_content, indent=2)}"
 
     try:
         response = client.chat.completions.create(
@@ -65,6 +80,7 @@ def find_slide_by_ai(api_key, prs, slide_type_prompt):
         )
         result = json.loads(response.choices[0].message.content)
         best_index = result.get("best_match_index", -1)
+
         if best_index != -1 and best_index < len(prs.slides):
             return prs.slides[best_index]
         return None
@@ -74,9 +90,12 @@ def find_slide_by_ai(api_key, prs, slide_type_prompt):
 
 def get_slide_content(slide):
     """Extracts title and body text from a slide."""
+    title, body = "", ""
     text_boxes = sorted([s for s in slide.shapes if s.has_text_frame and s.text.strip()], key=lambda s: s.top)
-    title = text_boxes[0].text if text_boxes else ""
-    body = "\n".join(s.text for s in text_boxes[1:]) if len(text_boxes) > 1 else ""
+    if text_boxes:
+        title = text_boxes[0].text
+        if len(text_boxes) > 1:
+            body = "\n".join(s.text for s in text_boxes[1:])
     return {"title": title, "body": body}
 
 def populate_slide(slide, content):
@@ -84,7 +103,6 @@ def populate_slide(slide, content):
     text_boxes = sorted([s for s in slide.shapes if s.has_text_frame and "lorem ipsum" in s.text.lower()], key=lambda s: s.top)
     if not text_boxes: return
 
-    # Clear placeholder text before populating
     for shape in text_boxes:
         shape.text_frame.clear()
         
@@ -135,13 +153,10 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                 template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
                 gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
                 
-                # CRITICAL FIX: Use the first template as a stable base
-                new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
-                # Delete all slides to create a clean, valid canvas
-                for i in range(len(new_prs.slides) - 1, -1, -1):
-                    rId = new_prs.slides._sldIdLst[i].rId
-                    new_prs.part.drop_rel(rId)
-                    del new_prs.slides._sldIdLst[i]
+                # Use the first template to set the dimensions for the new presentation
+                new_prs = Presentation()
+                new_prs.slide_width = template_prs_list[0].slide_width
+                new_prs.slide_height = template_prs_list[0].slide_height
 
                 st.write("Step 2/3: Building presentation from your structure...")
                 for i, step in enumerate(st.session_state.structure):
