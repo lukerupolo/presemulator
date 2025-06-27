@@ -31,23 +31,19 @@ def parse_pptx(path: str) -> dict:
         for shape in slide.shapes:
             if not hasattr(shape, 'text_frame') or not shape.text_frame:
                 continue
-            # Extract full text safely
             full_text = ''
             for paragraph in shape.text_frame.paragraphs:
                 for run in paragraph.runs:
                     full_text += run.text
-            # Font from first run if exists
             font_info = {'name': None, 'size': None, 'bold': False, 'italic': False}
-            if shape.text_frame.paragraphs:
-                first_para = shape.text_frame.paragraphs[0]
-                if first_para.runs:
-                    font = first_para.runs[0].font
-                    font_info = {
-                        'name': font.name,
-                        'size': font.size.pt if font.size else None,
-                        'bold': bool(font.bold),
-                        'italic': bool(font.italic)
-                    }
+            if shape.text_frame.paragraphs and shape.text_frame.paragraphs[0].runs:
+                font = shape.text_frame.paragraphs[0].runs[0].font
+                font_info = {
+                    'name': font.name,
+                    'size': font.size.pt if font.size else None,
+                    'bold': bool(font.bold),
+                    'italic': bool(font.italic)
+                }
             elements.append({
                 "text": full_text,
                 "font": font_info,
@@ -69,37 +65,41 @@ def convert_pdf_to_pptx(pdf_path: str) -> str:
 
 
 def call_openai_to_generate_code(slides_json: dict) -> str:
+    # Use new OpenAI Python v1.0+ interface
     system = (
         "You are a code generator. Given JSON describing slides, produce Python code using python-pptx"
         " that recreates each slide with fonts, positions, and colors."
     )
-    resp = openai.ChatCompletion.create(
+    response = openai.chat.completions.create(
         model="gpt-4o-code",
-        messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": json.dumps(slides_json, indent=2)}],
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(slides_json, indent=2)}
+        ],
         temperature=0
     )
-    return resp.choices[0].message.content
+    # Extract content from new API response
+    return response.choices[0].message.content
 
 
 def run_generated_code(code: str) -> str:
     with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, 'gen.py')
-        with open(path, 'w') as f:
+        script_path = os.path.join(tmp, 'gen.py')
+        with open(script_path, 'w') as f:
             f.write(code)
-        subprocess.run(['python', path], cwd=tmp, check=True)
-        out = os.path.join(tmp, 'recreated.pptx')
-        final = tempfile.mktemp(suffix='.pptx')
-        shutil.copy(out, final)
-        return final
+        subprocess.run(['python', script_path], cwd=tmp, check=True)
+        out_path = os.path.join(tmp, 'recreated.pptx')
+        final_path = tempfile.mktemp(suffix='.pptx')
+        shutil.copy(out_path, final_path)
+        return final_path
 
 # --- Main UI ---
-uploaded = st.file_uploader("Upload PPTX or PDF", type=["pptx","pdf"])
+uploaded = st.file_uploader("Upload PPTX or PDF", type=["pptx", "pdf"])
 if uploaded:
     suffix = os.path.splitext(uploaded.name)[1].lower()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded.getbuffer())
-        tmp_path = tmp.name
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+        tmp_file.write(uploaded.getbuffer())
+        tmp_path = tmp_file.name
     if suffix == '.pdf':
         try:
             tmp_path = convert_pdf_to_pptx(tmp_path)
@@ -128,6 +128,9 @@ if uploaded:
         st.success("Done! Download below:")
         with open(out_file, 'rb') as f:
             data = f.read()
-        st.download_button("Download PPTX", data=data,
-                           file_name="recreated.pptx",
-                           mime="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        st.download_button(
+            "Download PPTX",
+            data=data,
+            file_name="recreated.pptx",
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        )
