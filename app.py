@@ -11,14 +11,14 @@ import openai
 import json
 import requests
 import os
-import subprocess # NEW: For running git commands
-import tempfile   # NEW: For temporary directories
-import shutil     # NEW: For cleaning up directories
-import mimetypes  # NEW: For determining file types
+import subprocess # For running git commands
+import tempfile   # For temporary directories
+import shutil     # For cleaning up directories
+import mimetypes  # For determining file types
 
 # --- Configuration for the Conversion Service ---
 CONVERSION_SERVICE_URL = os.getenv("CONVERSION_SERVICE_URL", "http://localhost:8000/convert_document")
-# Get GitHub Token from environment variable
+# Get GitHub Token from environment variable. Set this securely in your deployment.
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 # --- Helper Function for Cloning and Downloading Files from GitHub ---
@@ -33,6 +33,9 @@ def _download_files_from_github(repo_url: str, branch: str, file_paths_or_patter
     
     # Construct authenticated URL if token is available
     if GITHUB_TOKEN:
+        # Example: https://github.com/org/repo.git -> https://oauth2:YOUR_PAT@github.com/org/repo.git
+        # Or using https://user:PAT@github.com/org/repo.git style for older git versions
+        # Modern git handles the token better as a credential helper, but for subprocess this is safer
         parsed_url = repo_url.replace("https://github.com/", f"https://oauth2:{GITHUB_TOKEN}@github.com/")
     else:
         parsed_url = repo_url
@@ -40,73 +43,78 @@ def _download_files_from_github(repo_url: str, branch: str, file_paths_or_patter
     temp_dir = None
     try:
         temp_dir = tempfile.mkdtemp()
-        repo_name = repo_url.split('/')[-1].replace(".git", "")
+        repo_name = repo_url.split('/')[-1].replace(".git", "") # Extract repo name from URL
         repo_path = os.path.join(temp_dir, repo_name)
 
         # Clone the repository
         st.info(f"Cloning '{repo_url}' (branch: {branch or 'default'})...")
-        clone_command = ["git", "clone", "--depth", "1"] # --depth 1 for shallow clone
+        # --depth 1 for a shallow clone (only latest commit) to save time/space
+        clone_command = ["git", "clone", "--depth", "1"] 
         if branch:
             clone_command.extend(["--branch", branch])
         clone_command.append(parsed_url)
-        clone_command.append(repo_path) # Clone into the named directory
+        clone_command.append(repo_path) # Clone into the named directory inside temp_dir
 
+        # Run git clone command
         result = subprocess.run(clone_command, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             st.error(f"Failed to clone repository: {result.stderr}")
             raise Exception(f"Git clone failed: {result.stderr}")
         
-        st.info("Repository cloned. Searching for files...")
+        st.info("Repository cloned. Searching for specified files/folders...")
 
-        # Find and read files based on paths/patterns
+        # Find and read files based on provided paths/patterns
         for path_or_pattern in file_paths_or_patterns:
-            full_path = os.path.join(repo_path, path_or_pattern)
+            full_path_in_repo = os.path.join(repo_path, path_or_pattern)
             
-            if os.path.isdir(full_path):
-                # If it's a directory, walk through it
-                for root, _, files in os.walk(full_path):
+            if os.path.isdir(full_path_in_repo):
+                # If it's a directory, walk through it to find all files
+                for root, _, files in os.walk(full_path_in_repo):
                     for file_name in files:
                         file_abs_path = os.path.join(root, file_name)
                         try:
                             with open(file_abs_path, "rb") as f:
                                 file_bytes = f.read()
+                            # Guess MIME type, with fallbacks for common types
                             mime_type, _ = mimetypes.guess_type(file_name)
-                            if not mime_type: # Fallback if guess_type fails
+                            if not mime_type: 
                                 if file_name.lower().endswith(".pptx"): mime_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
                                 elif file_name.lower().endswith(".pdf"): mime_type = "application/pdf"
-                                else: mime_type = "application/octet-stream" # Generic binary
-
+                                else: mime_type = "application/octet-stream" # Default binary type
+                            
                             downloaded_files_data.append((file_bytes, mime_type, file_name))
                             st.success(f"Found and loaded: {file_name} (Type: {mime_type})")
                         except Exception as e:
-                            st.warning(f"Could not read file {file_name} in {root}: {e}")
-            elif os.path.isfile(full_path):
+                            st.warning(f"Could not read file {file_name} in '{root}': {e}")
+            elif os.path.isfile(full_path_in_repo):
                 # If it's a single file
                 try:
-                    with open(full_path, "rb") as f:
+                    with open(full_path_in_repo, "rb") as f:
                         file_bytes = f.read()
-                    mime_type, _ = mimetypes.guess_type(full_path)
-                    if not mime_type: # Fallback
-                        if full_path.lower().endswith(".pptx"): mime_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                        elif full_path.lower().endswith(".pdf"): mime_type = "application/pdf"
+                    mime_type, _ = mimetypes.guess_type(full_path_in_repo)
+                    if not mime_type: 
+                        if full_path_in_repo.lower().endswith(".pptx"): mime_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                        elif full_path_in_repo.lower().endswith(".pdf"): mime_type = "application/pdf"
                         else: mime_type = "application/octet-stream"
 
-                    downloaded_files_data.append((file_bytes, mime_type, os.path.basename(full_path)))
-                    st.success(f"Found and loaded: {os.path.basename(full_path)} (Type: {mime_type})")
+                    downloaded_files_data.append((file_bytes, mime_type, os.path.basename(full_path_in_repo)))
+                    st.success(f"Found and loaded: {os.path.basename(full_path_in_repo)} (Type: {mime_type})")
                 except Exception as e:
-                    st.warning(f"Could not read single file {full_path}: {e}")
+                    st.warning(f"Could not read single file {full_path_in_repo}: {e}")
             else:
                 st.warning(f"Path not found or not a recognized file/directory: '{path_or_pattern}' in repo.")
 
         if not downloaded_files_data:
-            st.error(f"No files found matching patterns {file_paths_or_patterns} in '{repo_url}'.")
+            st.error(f"No files found matching patterns {file_paths_or_patterns} in '{repo_url}'. Please check the paths and verify they exist in the repository's '{branch}' branch.")
 
     except Exception as e:
         st.error(f"An error occurred during GitHub operation: {e}")
         return []
     finally:
+        # Clean up the temporary directory where the repo was cloned
         if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir) # Clean up the temporary directory
+            st.info(f"Cleaning up temporary directory: {temp_dir}")
+            shutil.rmtree(temp_dir) 
 
     return downloaded_files_data
 
@@ -354,7 +362,7 @@ def analyze_and_map_content(api_key, gtm_slide_content_data, template_slides_dat
     1.  **Select the BEST Template:**
         * **Crucially, you must review *each and every* template slide/page text summary AND its associated visual content.**
         * Semantically and **visually** evaluate which template slide's structure and implied purpose would *best* accommodate the `gtm_slide_content`.
-        * **Perform a comparative analysis:** Do not just pick the first decent match. Compare all options to find the single most suitable template based on a combined understanding of text and visuals. **Prioritize templates where the text *implies* a strong visual match, rather than just explicitly stating a type.** For instance, a template with short, sequential bullet points and dates might be a better visual timeline fit than one that simply has "Timeline" in its title but dense paragraphs.
+        * **Perform a comparative analysis:** Do not just pick the first decent match. Compare all options to find the single most suitable template based on a combined understanding of text and visuals. **Prioritize templates where the text *imlies* a strong visual match, rather than just explicitly stating a type.** For instance, a template with short, sequential bullet points and dates might be a better visual timeline fit than one that simply has "Timeline" in its title but dense paragraphs.
         * Consider factors like:
             * Does the template's textual layout (e.g., presence of sections, bullet points, titles) **and its visual layout (e.g., number of content blocks, placement of image placeholders, overall design)** match the theme/type of the GTM content.
             * Is there sufficient space or logical sections in the template for the GTM content based on its textual and visual structure?
@@ -503,20 +511,20 @@ with st.sidebar:
     api_key = st.text_input("OpenAI API Key", type="password")
     st.markdown("---")
     st.header("2. Input Documents from GitHub")
-    st.info("Files will be pulled from the specified GitHub repository.")
-    github_repo_url = st.text_input("GitHub Repository URL (e.g., https://github.com/org/repo-name.git)")
+    st.info("Files will be pulled from the specified GitHub repository. Ensure the GITHUB_TOKEN environment variable is set for private repos.")
+    github_repo_url = st.text_input("GitHub Repository URL (e.g., https://github.com/org/repo-name.git)", value="https://github.com/lukerupolo/presemulator.git")
     github_branch = st.text_input("GitHub Branch (optional, default: main)", value="main")
     
     st.subheader("Template Documents Paths")
     template_paths_raw = st.text_area(
         "Comma-separated paths/folders for Template Deck(s) within repo (e.g., templates/part1.pptx, templates/part2/, templates/cover.pdf)",
-        key="template_paths_raw"
+        value="templates/slide_template.pptx" # Example path, replace with your actual
     )
     
     st.subheader("GTM Global Document Path")
     gtm_paths_raw = st.text_area(
         "Comma-separated paths/folders for GTM Global Deck(s) within repo (e.g., gtm/global.pptx, gtm/report.pdf)",
-        key="gtm_paths_raw"
+        value="gtm_decks/example_gtm.pdf" # Example path, replace with your actual
     )
 
     st.markdown("---")
@@ -567,10 +575,10 @@ if github_repo_url and template_paths_raw and gtm_paths_raw and api_key and st.s
                 all_gtm_downloaded_files = _download_files_from_github(github_repo_url, github_branch, gtm_paths)
 
                 if not all_template_downloaded_files:
-                    st.error("No template files found or downloaded from GitHub.")
+                    st.error("No template files found or downloaded from GitHub. Please check paths and repository.")
                     st.stop()
                 if not all_gtm_downloaded_files:
-                    st.error("No GTM files found or downloaded from GitHub.")
+                    st.error("No GTM files found or downloaded from GitHub. Please check paths and repository.")
                     st.stop()
                 
                 # For GTM, we process only the first found file for now
@@ -598,7 +606,6 @@ if github_repo_url and template_paths_raw and gtm_paths_raw and api_key and st.s
                                 new_slide = new_prs.slides.add_slide(new_prs.slide_layouts[0]) 
                                 deep_copy_slide_content(new_slide, slide_to_merge) 
                     
-                    # Collect data for AI analysis from ALL template files (PPTX and PDF)
                     all_template_slides_for_ai.extend(get_all_slide_data(file_bytes, file_type))
 
                 if new_prs is None:
@@ -659,7 +666,7 @@ if github_repo_url and template_paths_raw and gtm_paths_raw and api_key and st.s
                             ai_mapping_result = analyze_and_map_content(
                                 api_key, 
                                 raw_gtm_content,
-                                all_template_slides_for_ai, # Pass all template data (PPTX+PDF) for AI
+                                all_template_slides_for_ai, 
                                 keyword
                             )
                             log_entry["log"].append(f"**AI Template Mapping Justification (PDF Fallback Merge):** {ai_mapping_result['justification']}")
@@ -687,7 +694,7 @@ if github_repo_url and template_paths_raw and gtm_paths_raw and api_key and st.s
                         ai_mapping_result = analyze_and_map_content(
                             api_key, 
                             raw_gtm_content,
-                            all_template_slides_for_ai, # Pass all template data (PPTX+PDF) for AI
+                            all_template_slides_for_ai, 
                             keyword
                         )
                         log_entry["log"].append(f"**AI Template Mapping Justification:** {ai_mapping_result['justification']}")
