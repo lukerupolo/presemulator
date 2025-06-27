@@ -71,7 +71,7 @@ def find_slide_in_templates(template_prs_list, title_keyword):
     return None
 
 def populate_text_in_shape(shape, text):
-    """Populates a shape with new text, clearing old content first."""
+    """Populates a shape with new text, clearing old content first and making it bold."""
     if not shape.has_text_frame:
         return
     
@@ -84,6 +84,8 @@ def populate_text_in_shape(shape, text):
     p = tf.add_paragraph()
     run = p.add_run()
     run.text = text
+    # --- NEW: Make the added text bold ---
+    run.font.bold = True
 
 # --- Streamlit App ---
 st.set_page_config(page_title="AI Presentation Assembler", layout="wide")
@@ -113,10 +115,11 @@ if template_files and gtm_file:
             try:
                 # --- Step 1: Load decks and create a stable base presentation ---
                 st.write("Step 1/4: Loading decks and preparing base presentation...")
-                template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
                 
                 # CRITICAL FIX: Use the GTM deck as the starting point for the new presentation.
                 new_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
+                template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
+
 
                 # --- Step 2: Prune the base deck to keep only "Objectives" slides ---
                 st.write("Step 2/4: Pruning base deck to keep 'Objectives' slides...")
