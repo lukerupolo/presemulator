@@ -2,7 +2,6 @@ import streamlit as st
 from pptx import Presentation
 from pptx.util import Pt
 import io
-import os
 import copy
 
 # --- Core PowerPoint Functions ---
@@ -113,32 +112,35 @@ if template_files and gtm_file:
         with st.spinner("Assembling your new presentation..."):
             try:
                 # --- Step 1: Load decks and create a stable base presentation ---
-                st.write("Step 1/4: Loading decks and preparing a clean base...")
+                st.write("Step 1/4: Loading decks and preparing base presentation...")
                 template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
-                gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
+                
+                # CRITICAL FIX: Use the GTM deck as the starting point for the new presentation.
+                new_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
 
-                # CRITICAL FIX: Use the first template as the base for the new presentation.
-                new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
+                # --- Step 2: Prune the base deck to keep only "Objectives" slides ---
+                st.write("Step 2/4: Pruning base deck to keep 'Objectives' slides...")
+                slides_to_delete = []
+                for i, slide in enumerate(new_prs.slides):
+                    is_objective_slide = False
+                    for shape in slide.shapes:
+                        if shape.has_text_frame and "objectives" in shape.text.lower():
+                             if shape.top < Pt(150): # Heuristic for title
+                                is_objective_slide = True
+                                break
+                    if not is_objective_slide:
+                        slides_to_delete.append(i)
 
-                # Delete all slides from the base to create a clean, styled canvas.
-                for i in range(len(new_prs.slides) - 1, -1, -1):
+                # Delete slides in reverse order to avoid index issues.
+                for i in sorted(slides_to_delete, reverse=True):
                     rId = new_prs.slides._sldIdLst[i].rId
                     new_prs.part.drop_rel(rId)
                     del new_prs.slides._sldIdLst[i]
 
-                # --- Step 2: Find and copy "Objectives" slides from GTM deck ---
-                st.write("Step 2/4: Finding and copying 'Franchise Objectives' slides...")
-                objective_slides_from_gtm = find_slides_by_title(gtm_prs, "objectives")
-
-                if not objective_slides_from_gtm:
-                    st.warning("Could not find any slides with 'Objectives' in the GTM deck title.")
-                else:
-                    for slide in objective_slides_from_gtm:
-                        clone_slide(new_prs, slide)
-                    st.success(f"Copied {len(objective_slides_from_gtm)} 'Objectives' slide(s) from the GTM deck.")
+                st.success(f"Kept {len(new_prs.slides)} 'Objectives' slide(s) as the base.")
 
                 # --- Step 3: Find "Activation" slide in templates, copy, then populate ---
-                st.write("Step 3/4: Finding 'Activation' slide in templates and populating...")
+                st.write("Step 3/4: Finding 'Activation' slide in templates and appending...")
                 activation_slide_from_template = find_slide_in_templates(template_prs_list, "activation")
 
                 if not activation_slide_from_template:
