@@ -1,6 +1,5 @@
 import streamlit as st
 from pptx import Presentation
-from pptx.enum.shapes import MSO_SHAPE_TYPE
 import io
 import os
 import openai
@@ -9,133 +8,147 @@ from lxml.etree import ElementBase
 
 # --- Core PowerPoint Functions ---
 
-def clone_slide(pres, slide_to_clone):
+def clone_slide(pres_to, slide_from):
     """
     Duplicates a slide from a source presentation into a target presentation.
-    This is a complex but necessary function to ensure a high-fidelity copy.
+    This is the most critical function for a high-fidelity copy.
     """
     # 1. Add a blank slide to the target presentation
-    blank_slide_layout = pres.slide_layouts[6] # Index 6 is typically a blank layout
-    new_slide = pres.slides.add_slide(blank_slide_layout)
+    # Using a blank layout is a common starting point
+    blank_slide_layout = pres_to.slide_layouts[6] 
+    new_slide = pres_to.slides.add_slide(blank_slide_layout)
 
-    # 2. Copy background
-    new_slide.background.fill.solid()
-    new_slide.background.fill.fore_color.rgb = slide_to_clone.background.fill.fore_color.rgb
+    # 2. Duplicate the slide's part (the XML representation)
+    sl = slide_from.element
+    new_sl = copy.deepcopy(sl)
+
+    # 3. Create a mapping of relationship IDs from old to new
+    rId_map = {}
+
+    # 4. Copy slide-level relationships (like images, charts)
+    for r in slide_from.part.rels:
+        rel = slide_from.part.rels[r]
+        if "image" in rel.target_ref:
+            # For images, we get the image data and add it to the new presentation's package
+            image_part = rel.target_part
+            new_part = pres_to.part.package.get_part(image_part.partname)
+            if new_part is None:
+                new_part = pres_to.part.package.add_part(image_part.partname, image_part.content_type, image_part.blob)
+            
+            # Create a new relationship in the new slide
+            new_rId = new_slide.part.relate_to(new_part, rel.reltype)
+            rId_map[rel.rId] = new_rId
+
+    # 5. Replace the blank slide's XML with the copied slide's XML
+    new_slide.element.getparent().replace(new_slide.element, new_sl)
     
-    # 3. Copy shapes from the original slide to the new slide
-    for shape in slide_to_clone.shapes:
-        if shape.is_placeholder:
-            # Handle placeholders by creating a new one
-            ph = shape.placeholder_format
-            new_ph = new_slide.placeholders.add_placeholder(ph.idx, ph.type, shape.left, shape.top, shape.width, shape.height)
-            # Copy text and formatting
-            if shape.has_text_frame:
-                new_ph.text_frame.text = shape.text_frame.text
-        else:
-            # For non-placeholder shapes, we copy them by creating a new element
-            new_el = copy.deepcopy(shape.element)
-            new_slide.shapes._spTree.insert_element_before(new_el, 'p:extLst')
-
+    # 6. Update relationship IDs in the copied XML
+    for old_rId, new_rId in rId_map.items():
+        for elem in new_slide.element.xpath(f'.//*[@r:id="{old_rId}"]', namespaces={'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'}):
+            elem.set('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id', new_rId)
+            
     return new_slide
 
-def find_slide_by_title(prs, title):
-    """Finds the first slide in a presentation that contains a specific title."""
-    for i, slide in enumerate(prs.slides):
+
+def find_slides_by_title(prs, title_keyword):
+    """Finds all slides in a presentation that contain a specific keyword in their title."""
+    found_slides = []
+    for slide in prs.slides:
         for shape in slide.shapes:
-            if shape.has_text_frame and title.lower() in shape.text.lower():
-                return slide
-    return None
+            if shape.has_text_frame and title_keyword.lower() in shape.text.lower():
+                # Heuristic: Check if it's likely a title shape (often at the top)
+                if shape.top < Pt(150): 
+                    found_slides.append(slide)
+                    break 
+    return found_slides
 
-def populate_title_slide(slide, project_name, subtitle):
-    """Populates the placeholders on a title slide with new text."""
-    title_placeholder = None
-    subtitle_placeholder = None
-
-    # Find title and subtitle placeholders
-    for shape in slide.placeholders:
-        if shape.placeholder_format.type.name in ('TITLE', 'CENTER_TITLE'):
-            title_placeholder = shape
-        elif shape.placeholder_format.type.name == 'SUBTITLE':
-            subtitle_placeholder = shape
-            
-    # If standard placeholders aren't found, use heuristics
-    if not title_placeholder or not subtitle_placeholder:
-         text_boxes = sorted([s for s in slide.shapes if s.has_text_frame], key=lambda s: s.top)
-         if len(text_boxes) >= 2:
-             title_placeholder = text_boxes[0]
-             subtitle_placeholder = text_boxes[1]
-
-    if title_placeholder:
-        title_placeholder.text = project_name
-    if subtitle_placeholder:
-        subtitle_placeholder.text = subtitle
+def populate_text_in_shape(shape, text):
+    """Populates a shape with new text, preserving the first run's formatting."""
+    if not shape.has_text_frame:
+        return
+        
+    tf = shape.text_frame
+    # Clear existing text
+    for para in tf.paragraphs:
+        for run in para.runs:
+            run.text = ''
+    
+    # Add new text with preserved formatting
+    p = tf.paragraphs[0]
+    run = p.add_run()
+    run.text = text
 
 # --- Streamlit App ---
 
-st.set_page_config(page_title="AI Presentation Generator", layout="wide")
-st.title("🤖 AI Presentation Generator from Template")
-st.write("This tool uses a template presentation as a 'slide bank' to build new decks, ensuring perfect style emulation.")
+st.set_page_config(page_title="AI Presentation Assembler", layout="wide")
+st.title("🤖 AI Presentation Assembler")
+st.write("This tool builds a new regional presentation by combining slides from a global GTM deck and a template slide bank.")
 
 # --- UI for File Uploads ---
-st.header("1. Upload Your Files")
+st.header("1. Upload Your Decks")
 col1, col2 = st.columns(2)
 
 with col1:
-    template_file = st.file_uploader("Upload Template Deck (.pptx)", type=["pptx"], help="This presentation will be used as a 'slide bank' for styles and layouts.")
+    template_file = st.file_uploader("Upload Template Deck (.pptx)", type=["pptx"], help="The 'slide bank' with approved layouts (e.g., Activation slide).")
 
 with col2:
-    # In the future, this could be a content deck or just a prompt
-    content_prompt = st.text_input("Enter the main topic for the presentation", value="Quarterly Marketing Plan", help="For this demo, this will be used to generate a title.")
+    gtm_file = st.file_uploader("Upload GTM Global Deck (.pptx)", type=["pptx"], help="The source of core content to be copied directly (e.g., Objectives slides).")
 
 
 # --- Main Logic ---
-if template_file and content_prompt:
-    if st.button("🚀 Generate Presentation", type="primary"):
-        with st.spinner("Building your presentation..."):
+if template_file and gtm_file:
+    if st.button("🚀 Assemble Regional Deck", type="primary"):
+        with st.spinner("Assembling your new presentation..."):
             try:
-                # --- Step 1: Load the template and find the title slide ---
-                st.write("Step 1/3: Analyzing template and finding 'Title Page'...")
-                template_bytes = template_file.getvalue()
-                template_prs = Presentation(io.BytesIO(template_bytes))
-                
-                title_slide_from_template = find_slide_by_title(template_prs, "TITLE PAGE")
-                
-                if not title_slide_from_template:
-                    st.error("Could not find a slide with 'TITLE PAGE' in your template. Please ensure one exists.")
-                    st.stop()
-                
-                st.success("Found 'TITLE PAGE' in the template.")
+                # --- Step 1: Load both presentations ---
+                st.write("Step 1/4: Loading and analyzing decks...")
+                template_prs = Presentation(io.BytesIO(template_file.getvalue()))
+                gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
 
-                # --- Step 2: Create a new presentation and copy the slide ---
-                st.write("Step 2/3: Creating new deck and copying the title slide...")
+                # Create the new presentation, matching the template's size
                 new_prs = Presentation()
-                
-                # We need to make sure the slide size of the new presentation matches the template
                 new_prs.slide_width = template_prs.slide_width
                 new_prs.slide_height = template_prs.slide_height
 
-                copied_slide = clone_slide(new_prs, title_slide_from_template)
-                
-                # --- Step 3: Populate the new slide with AI-generated (or placeholder) content ---
-                st.write("Step 3/3: Populating the new slide with content...")
-                
-                # For this demo, we'll use simple placeholder text as requested.
-                # In a real scenario, this would come from another AI call or content file.
-                project_name = content_prompt
-                subtitle_text = "AI-Generated Content | Regional Strategy"
+                # --- Step 2: Find and copy "Objectives" slides from GTM deck ---
+                st.write("Step 2/4: Finding and copying 'Franchise Objectives' slides...")
+                objective_slides_from_gtm = find_slides_by_title(gtm_prs, "objectives")
 
-                populate_title_slide(copied_slide, project_name, subtitle_text)
+                if not objective_slides_from_gtm:
+                    st.warning("Could not find any slides with 'Objectives' in the GTM deck title.")
+                else:
+                    for slide in objective_slides_from_gtm:
+                        clone_slide(new_prs, slide)
+                    st.success(f"Copied {len(objective_slides_from_gtm)} 'Objectives' slide(s) from the GTM deck.")
+
+                # --- Step 3: Find and copy "Activation" slide from Template, then populate ---
+                st.write("Step 3/4: Finding 'Activation' slide in template and populating...")
+                activation_slide_from_template = find_slides_by_title(template_prs, "activation")
+
+                if not activation_slide_from_template:
+                    st.warning("Could not find any slides with 'Activation' in the Template deck title.")
+                else:
+                    # Copy the first found activation slide
+                    copied_activation_slide = clone_slide(new_prs, activation_slide_from_template[0])
+                    
+                    # Populate with placeholder text
+                    for shape in copied_activation_slide.shapes:
+                        if shape.has_text_frame and "Lorem Ipsum" in shape.text: # Simple heuristic to find body
+                            populate_text_in_shape(shape, "Placeholder for regional activation details.\n- Tactic 1: [INSERT REGIONAL TACTIC]\n- Tactic 2: [INSERT REGIONAL TACTIC]\n- Budget: [INSERT REGIONAL BUDGET]")
+                    
+                    st.success("Added and populated 1 'Activation' slide from the template.")
                 
                 # --- Final Step: Save and provide download ---
+                st.write("Step 4/4: Finalizing and preparing download...")
                 output_buffer = io.BytesIO()
                 new_prs.save(output_buffer)
                 output_buffer.seek(0)
 
-                st.success("🎉 Your new presentation has been generated!")
+                st.success("🎉 Your new regional presentation has been assembled!")
 
-                new_filename = f"{project_name.replace(' ', '_')}_presentation.pptx"
+                new_filename = "Regional_Deck_Assembled.pptx"
                 st.download_button(
-                    label="Download Generated PowerPoint",
+                    label="Download Assembled PowerPoint",
                     data=output_buffer,
                     file_name=new_filename,
                     mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -146,4 +159,5 @@ if template_file and content_prompt:
                 st.exception(e)
 
 else:
-    st.info("Please upload a template deck and provide a topic to begin.")
+    st.info("Please upload both a Template Deck and a GTM Global Deck to begin.")
+
