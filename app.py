@@ -1,15 +1,59 @@
 import streamlit as st
 from pptx import Presentation
+from pptx.util import Pt
 import io
 import copy
 import uuid
 import openai
 import json
 import requests
-from PIL import Image
-import os
 
 # --- Core PowerPoint Functions ---
+
+def deep_copy_slide(dest_pres, dest_slide, src_slide):
+    """
+    Performs a stable, deep copy of all shapes and content from a source slide
+    to a destination slide. This new version correctly handles linked images
+    by downloading and embedding them.
+    """
+    # Clear all shapes from the destination slide first to prepare it.
+    for shape in list(dest_slide.shapes):
+        sp = shape.element
+        sp.getparent().remove(sp)
+
+    # Iterate through shapes in the source slide and copy them to the destination.
+    for shape in src_slide.shapes:
+        # Check if the shape is a picture and if it is linked externally.
+        if shape.shape_type == 13: # 13 is the shape type for Picture
+            # The relationship ID for the image is in the 'r:link' attribute for linked images
+            # and 'r:embed' for embedded images. We need to parse the XML to find it.
+            blip_element = shape.element.xpath('.//a:blip', namespaces={'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'})
+            if blip_element:
+                blip = blip_element[0]
+                rId = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}link')
+                
+                if rId:
+                    # It's a linked image. We need to find the URL in the relationships file.
+                    try:
+                        image_url = src_slide.part.rels[rId].target_ref
+                        # Download the image
+                        response = requests.get(image_url, stream=True)
+                        response.raise_for_status()
+                        image_stream = io.BytesIO(response.content)
+                        
+                        # Add the downloaded image to the destination slide
+                        dest_slide.shapes.add_picture(image_stream, shape.left, shape.top, width=shape.width, height=shape.height)
+                        continue # Skip the generic element copy for this shape
+                    except (KeyError, requests.exceptions.RequestException) as e:
+                        # If download fails or relationship is not found, we fall back to copying the shape element
+                        # This will result in a broken link, but it's better than crashing.
+                        st.warning(f"Could not download linked image for shape on slide. Error: {e}")
+                        pass
+        
+        # For all other shapes (or as a fallback for pictures), copy the element
+        new_el = copy.deepcopy(shape.element)
+        dest_slide.shapes._spTree.insert_element_before(new_el, 'p:extLst')
+
 
 def find_slide_by_ai(api_key, prs, slide_type_prompt, all_slides_content):
     """Uses OpenAI to intelligently find the best matching slide and get a justification."""
@@ -64,31 +108,10 @@ def populate_slide(slide, content):
         run.text = content.get("body", "")
         run.font.bold = True
 
-def deep_copy_slide(dest_pres, src_slide):
-    """Deep copies a slide from source to destination presentation."""
-    dest_layout = dest_pres.slide_layouts[6] # Using a blank layout
-    dest_slide = dest_pres.slides.add_slide(dest_layout)
-    for shape in list(dest_slide.shapes):
-        sp = shape.element
-        sp.getparent().remove(sp)
-    for shape in src_slide.shapes:
-        new_el = copy.deepcopy(shape.element)
-        dest_slide.shapes._spTree.insert_element_before(new_el, 'p:extLst')
-
-def get_slide_thumbnail(slide):
-    """Creates a PIL Image thumbnail of a slide."""
-    title = get_slide_content(slide).get("title", f"Slide {slide.slide_id}")
-    img = Image.new('RGB', (400, 300), color = 'white')
-    from PIL import ImageDraw
-    d = ImageDraw.Draw(img)
-    d.text((10,10), f"Thumbnail for:\n{title[:50]}...", fill=(0,0,0))
-    return img
-
 # --- Streamlit App ---
 st.set_page_config(page_title="Interactive AI Presentation Assembler", layout="wide")
 st.title("🤖 Interactive AI Presentation Assembler")
 
-# --- Initialize Session State ---
 if 'structure' not in st.session_state: st.session_state.structure = []
 if 'build_plan' not in st.session_state: st.session_state.build_plan = None
 if 'assembly_started' not in st.session_state: st.session_state.assembly_started = False
@@ -119,10 +142,7 @@ with st.sidebar:
         st.session_state.assembly_started = False
         st.rerun()
 
-# --- Main App Logic ---
-# FIX: Corrected typo from gtm_.file to gtm_file
 if template_file and gtm_file and api_key and st.session_state.structure:
-    # Generate Plan Button
     if st.button("1. Generate Build Plan", type="primary"):
         st.session_state.assembly_started = True
         with st.spinner("Analyzing decks and creating initial plan..."):
@@ -152,45 +172,30 @@ if st.session_state.assembly_started and st.session_state.build_plan:
     st.markdown("---")
     st.header("3. Review and Approve Build Plan")
 
-    # Display the interactive build plan
     for i, item in enumerate(st.session_state.build_plan):
         st.subheader(f"Step {i+1}: '{item['keyword']}'")
-        
+        # In a real app, you would show thumbnails here. For now, we show justifications.
         if item['action'] == "Copy from GTM (as is)":
-            gtm_choice = item['gtm_choice']
-            st.info(f"AI Justification (Content): {gtm_choice['justification']}")
-            if gtm_choice['slide']:
-                img = get_slide_thumbnail(gtm_choice['slide'])
-                st.image(img, caption=f"Selected GTM Slide {gtm_choice['index']+1}")
-        
+            st.info(f"AI Justification (Content): {item['gtm_choice']['justification']}")
         elif item['action'] == "Merge: Template Layout + GTM Content":
-            template_choice = item['template_choice']
-            gtm_choice = item['gtm_choice']
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.info(f"AI Justification (Layout): {template_choice['justification']}")
-                if template_choice['slide']:
-                    img = get_slide_thumbnail(template_choice['slide'])
-                    st.image(img, caption=f"Selected Template Layout Slide {template_choice['index']+1}")
-            with col2:
-                st.info(f"AI Justification (Content): {gtm_choice['justification']}")
-                if gtm_choice['slide']:
-                    img = get_slide_thumbnail(gtm_choice['slide'])
-                    st.image(img, caption=f"Selected GTM Content Slide {gtm_choice['index']+1}")
+            st.info(f"AI Justification (Layout): {item['template_choice']['justification']}")
+            st.info(f"AI Justification (Content): {item['gtm_choice']['justification']}")
 
     st.markdown("---")
-    # Assemble Button
     if st.button("2. Assemble Final Presentation", type="primary"):
         with st.spinner("Executing final assembly..."):
-            final_prs = Presentation()
-            final_prs.slide_width = st.session_state.template_prs.slide_width
-            final_prs.slide_height = st.session_state.template_prs.slide_height
+            final_prs = Presentation(io.BytesIO(template_file.getvalue()))
+            # Clear all slides to start fresh but keep the master styles
+            for i in range(len(final_prs.slides) - 1, -1, -1):
+                rId = final_prs.slides._sldIdLst[i].rId
+                final_prs.part.drop_rel(rId)
+                del final_prs.slides._sldIdLst[i]
 
             for item in st.session_state.build_plan:
                 if item['action'] == "Copy from GTM (as is)":
                     if item['gtm_choice']['slide']:
-                        deep_copy_slide(final_prs, item['gtm_choice']['slide'])
+                        new_slide = final_prs.slides.add_slide(item['gtm_choice']['slide'].slide_layout)
+                        deep_copy_slide(final_prs, new_slide, item['gtm_choice']['slide'])
                 elif item['action'] == "Merge: Template Layout + GTM Content":
                     if item['template_choice']['slide'] and item['gtm_choice']['slide']:
                         content = get_slide_content(item['gtm_choice']['slide'])
@@ -203,6 +208,5 @@ if st.session_state.assembly_started and st.session_state.build_plan:
             st.success("🎉 Your new regional presentation has been assembled!")
             st.download_button("Download Assembled PowerPoint", data=output_buffer, file_name="Interactive_AI_Assembled_Deck.pptx")
             
-            # Clean up session state
             st.session_state.build_plan = None
             st.session_state.assembly_started = False
