@@ -56,15 +56,6 @@ def find_slide_by_ai(api_key, prs, slide_type_prompt, deck_name):
     except Exception as e:
         return {"slide": None, "index": -1, "justification": f"An error occurred during analysis: {e}"}
 
-def find_slide_in_templates(api_key, template_prs_list, slide_type_prompt):
-    """Searches through all template presentations to find the best layout slide."""
-    for i, prs in enumerate(template_prs_list):
-        result = find_slide_by_ai(api_key, prs, slide_type_prompt, f"Template Deck {i+1}")
-        if result and result["slide"]:
-            # Return the first good match found across all templates
-            return result
-    return {"slide": None, "index": -1, "justification": "Could not find a suitable layout in any template deck."}
-
 def get_slide_content(slide):
     """Extracts title and body text from a slide."""
     if not slide: return {"title": "", "body": ""}
@@ -124,7 +115,6 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                 # CRITICAL: Use the first template as the base for the new presentation.
                 new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
                 gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
-                template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
                 
                 process_log = []
                 st.write("Step 2/3: Building new presentation based on your structure...")
@@ -150,8 +140,6 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                             log_entry["log"].append("**Action:** No suitable slide found in GTM deck. Template slide was left as is.")
                     
                     elif action == "Merge: Template Layout + GTM Content":
-                        # For a merge, we use the template slide we are currently on (dest_slide)
-                        # And find the best content from the GTM deck.
                         content_result = find_slide_by_ai(api_key, gtm_prs, keyword, "GTM Deck")
                         log_entry["log"].append(f"**GTM Content Choice Justification:** {content_result['justification']}")
                         if content_result["slide"]:
@@ -181,4 +169,9 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                 
                 output_buffer = io.BytesIO(); new_prs.save(output_buffer); output_buffer.seek(0)
                 st.success("🎉 Your new regional presentation has been assembled!")
-                st.download_button("Download Assembled PowerPoint", data=output_buf
+                st.download_button("Download Assembled PowerPoint", data=output_buffer, file_name="Dynamic_AI_Assembled_Deck.pptx")
+            except Exception as e:
+                st.error(f"A critical error occurred: {e}"); st.exception(e)
+else:
+    st.info("Please provide an API Key, upload at least one Template Deck and a GTM Deck, and define the structure in the sidebar to begin.")
+
