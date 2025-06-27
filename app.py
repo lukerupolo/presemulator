@@ -1,6 +1,8 @@
 import streamlit as st
 from pptx import Presentation
 from pptx.util import Pt
+from pptx.enum.dml import MSO_THEME_COLOR
+from pptx.dml.color import RGBColor
 import openai
 import io
 import os
@@ -8,58 +10,48 @@ import json
 
 # --- Core Functions ---
 
-def extract_text_from_pptx(prs):
-    """Extracts text from each slide, returning a list of strings."""
-    slide_texts = []
-    for slide in prs.slides:
-        text_on_slide = []
-        for shape in slide.shapes:
-            if not shape.has_text_frame:
-                continue
-            for paragraph in shape.text_frame.paragraphs:
-                for run in paragraph.runs:
-                    text_on_slide.append(run.text)
-        slide_texts.append(" ".join(text_on_slide))
-    return slide_texts
+def get_placeholder_text(slide, placeholder_type):
+    """Safely gets text from a placeholder type (e.g., 'TITLE', 'BODY')."""
+    for shape in slide.placeholders:
+        if shape.placeholder_format.type.name == placeholder_type:
+            return shape.text
+    return ""
 
-def get_ai_modified_content(api_key, original_texts, user_prompt):
-    """
-    Sends the extracted text and a user prompt to OpenAI for modification.
+def extract_structured_text_from_pptx(prs):
+    """Extracts structured text (title and body) from each slide."""
+    slide_data = []
+    for i, slide in enumerate(prs.slides):
+        title = get_placeholder_text(slide, 'TITLE')
+        body = get_placeholder_text(slide, 'BODY')
+        slide_data.append({"slide_number": i + 1, "title": title, "body": body})
+    return slide_data
 
-    Args:
-        api_key (str): The user's OpenAI API key.
-        original_texts (list): A list of strings, where each string is the text of a slide.
-        user_prompt (str): The user's instruction for the AI.
-
-    Returns:
-        list: A list of modified slide texts from the AI.
-    """
+def get_ai_modified_content(api_key, original_slide_data, user_prompt):
+    """Sends the structured slide data to OpenAI for modification."""
     try:
         client = openai.OpenAI(api_key=api_key)
     except Exception as e:
         raise ValueError(f"Failed to initialize OpenAI client. Check your API key. Error: {e}")
 
-    # The system prompt guides the AI to return data in a specific JSON format.
     system_prompt = """
-    You are an expert presentation editor. You will be given the text content of a series of slides as a JSON array of strings.
-    You will also be given an instruction. Your task is to rewrite the text for each slide according to the instruction.
-    You MUST return a JSON object with a single key 'modified_slides'. This key should contain an array of strings.
-    This array must have the exact same number of elements as the input array.
-    Each string in the output array should be the complete, rewritten text for the corresponding slide.
+    You are an expert presentation editor. You will be given a JSON object representing the slides in a presentation.
+    Each slide object has a 'title' and a 'body'. Your task is to rewrite the title and body for each slide according to the user's instruction.
+    You MUST return a JSON object with a single key 'modified_slides'. This key should contain an array of objects, one for each slide.
+    Each object must have 'title' and 'body' keys with the rewritten text.
+    The number of slide objects in your response must exactly match the number in the input. Maintain the original slide structure.
     Do not add any extra commentary. Only return the JSON object.
     """
 
-    # We combine the user's prompt with the extracted text for the AI.
     full_user_prompt = f"""
     Instruction: "{user_prompt}"
 
-    Original slide texts (JSON array):
-    {json.dumps(original_texts, indent=2)}
+    Original slide data:
+    {json.dumps(original_slide_data, indent=2)}
     """
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4-turbo",  # Using a powerful model for better results
+            model="gpt-4-turbo",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": full_user_prompt},
@@ -83,106 +75,118 @@ def get_ai_modified_content(api_key, original_texts, user_prompt):
         st.error(f"OpenAI Response (if any): {response_content}")
         return None
 
+def preserve_and_set_text(text_frame, new_text):
+    """Replaces text in a text_frame while preserving the formatting of the first run."""
+    if not text_frame.paragraphs:
+        p = text_frame.add_paragraph()
+        p.text = new_text
+        return
 
-def update_presentation_with_new_text(prs, new_texts):
-    """
-    Replaces the text in the presentation with the modified text from the AI.
-    It targets the main content placeholder on each slide.
-    """
-    if len(prs.slides) != len(new_texts):
-        st.warning("Warning: The number of modified slides from the AI does not match the original presentation.")
-        return prs
+    # Store formatting from the first run of the first paragraph
+    first_p = text_frame.paragraphs[0]
+    font_name, font_size, font_bold, font_italic, font_color = None, Pt(18), None, None, None
+    
+    if first_p.runs:
+        original_font = first_p.runs[0].font
+        font_name = original_font.name
+        font_size = original_font.size
+        font_bold = original_font.bold
+        font_italic = original_font.italic
+        font_color = original_font.color
+    
+    # Clear the entire text frame to remove old content
+    text_frame.clear()
+    
+    # Add new paragraph with the new text
+    p = text_frame.add_paragraph()
+    run = p.add_run()
+    run.text = new_text
+    
+    # Apply the preserved formatting
+    font = run.font
+    if font_name:
+        font.name = font_name
+    if font_size:
+        font.size = font_size
+    if font_bold is not None:
+        font.bold = font_bold
+    if font_italic is not None:
+        font.italic = font_italic
+    if font_color:
+        if font_color.type == MSO_THEME_COLOR:
+            font.color.theme_color = font_color.theme_color
+            font.color.brightness = font_color.brightness
+        elif hasattr(font_color, 'rgb'):
+            font.color.rgb = font_color.rgb
+
+
+def update_presentation_with_new_text(prs, modified_slides):
+    """Updates presentation with AI-modified text, preserving formatting."""
+    if len(prs.slides) != len(modified_slides):
+        st.warning("Mismatch between original slide count and AI response count.")
+        return
 
     for i, slide in enumerate(prs.slides):
-        if i >= len(new_texts):
-            break 
-        new_text = new_texts[i]
+        slide_mods = modified_slides[i]
         
-        body_shape = None
+        # Update Title
         for shape in slide.placeholders:
-            if shape.placeholder_format.type in ('BODY', 'OBJECT'):
-                 body_shape = shape
-                 break
-        
-        if not body_shape:
-            max_text_len = -1
-            candidate_shape = None
-            for shape in slide.shapes:
-                if shape.has_text_frame and len(shape.text) > max_text_len:
-                    max_text_len = len(shape.text)
-                    candidate_shape = shape
-            body_shape = candidate_shape
-        
-        if body_shape:
-            text_frame = body_shape.text_frame
-            text_frame.clear()
-            p = text_frame.paragraphs[0]
-            p.text = new_text
-            p.font.size = Pt(18)
-        else:
-            st.warning(f"Could not find a suitable text box on slide {i+1} to replace content.")
+            if shape.placeholder_format.type.name == 'TITLE':
+                preserve_and_set_text(shape.text_frame, slide_mods.get('title', ''))
 
-    return prs
+            if shape.placeholder_format.type.name == 'BODY':
+                 preserve_and_set_text(shape.text_frame, slide_mods.get('body', ''))
 
 # --- Streamlit UI ---
 
 st.set_page_config(page_title="AI PowerPoint Editor", layout="wide")
 st.title("🤖 AI-Powered PowerPoint Content Editor")
-st.write("This application uses AI to analyze and rewrite the content of your PowerPoint presentation based on your instructions.")
+st.write("This application intelligently rewrites your presentation's content while preserving its original formatting.")
 
-# --- Sidebar for Inputs ---
 with st.sidebar:
     st.header("Controls")
     api_key = st.text_input("Enter your OpenAI API Key", type="password")
-    
     st.markdown("---")
-    
     uploaded_file = st.file_uploader("1. Upload a PowerPoint (.pptx)", type=["pptx"])
-    
     st.markdown("---")
-
     user_prompt = st.text_area(
         "2. Enter your editing instruction",
         height=150,
-        placeholder="e.g., 'Rewrite the objectives on these slides to reflect an Australian market perspective.' or 'Summarize the key points on each slide into three bullet points.'"
+        placeholder="e.g., 'Rewrite the content to reflect an Australian market perspective.' or 'Summarize the key points into bullet points.'"
     )
 
-# --- Main App Logic ---
 if uploaded_file is not None:
-    original_filename = uploaded_file.name
-    
     if st.button("✨ Process Presentation with AI", type="primary"):
         if not api_key:
-            st.error("Please enter your OpenAI API key in the sidebar.")
+            st.error("Please enter your OpenAI API key.")
         elif not user_prompt:
-            st.error("Please enter an instruction for the AI in the sidebar.")
+            st.error("Please enter an instruction for the AI.")
         else:
-            with st.spinner("Processing your presentation... This may take a moment."):
-                # FIX: This entire block is now correctly indented
+            with st.spinner("Processing... This may take a moment."):
                 try:
-                    st.write("Step 1/4: Reading your presentation...")
                     file_content = uploaded_file.getvalue()
                     prs = Presentation(io.BytesIO(file_content))
-                    original_texts = extract_text_from_pptx(prs)
+                    
+                    st.write("Step 1/4: Reading slide titles and content...")
+                    original_data = extract_structured_text_from_pptx(prs)
+                    
+                    st.write("Step 2/4: Asking AI to rewrite content...")
+                    modified_data = get_ai_modified_content(api_key, original_data, user_prompt)
 
-                    st.write("Step 2/4: Asking the AI to rewrite the content...")
-                    modified_texts = get_ai_modified_content(api_key, original_texts, user_prompt)
-
-                    if modified_texts:
-                        st.write("Step 3/4: Updating the slides with the new content...")
+                    if modified_data:
+                        st.write("Step 3/4: Updating slides while preserving formatting...")
                         prs_to_edit = Presentation(io.BytesIO(file_content))
-                        update_presentation_with_new_text(prs_to_edit, modified_texts)
+                        update_presentation_with_new_text(prs_to_edit, modified_data)
 
                         st.write("Step 4/4: Preparing your download...")
                         output_buffer = io.BytesIO()
                         prs_to_edit.save(output_buffer)
                         output_buffer.seek(0)
                         
-                        base, ext = os.path.splitext(original_filename)
+                        base, ext = os.path.splitext(uploaded_file.name)
                         new_filename = f"{base}_ai_modified.pptx"
 
                         st.success("🎉 Your presentation has been successfully modified!")
-                        
                         st.download_button(
                             label="Download Modified PowerPoint",
                             data=output_buffer,
@@ -192,4 +196,4 @@ if uploaded_file is not None:
                 except Exception as e:
                     st.error(f"A critical error occurred: {e}")
 else:
-    st.info("Upload a PowerPoint file and provide your API key and instructions in the sidebar to begin.")
+    st.info("Upload a PowerPoint, provide an API key and instructions in the sidebar to begin.")
