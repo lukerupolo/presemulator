@@ -72,8 +72,11 @@ def populate_slide(slide, content):
         if not shape.has_text_frame:
             continue
         
+        # --- FIX: Check if it IS a placeholder before checking its type ---
+        is_placeholder = shape.is_placeholder
+        
         # Heuristic for Title placeholder
-        if not title_populated and (shape.placeholder_format.type in ('TITLE', 'CENTER_TITLE') or shape.top < Pt(150)):
+        if not title_populated and ( (is_placeholder and shape.placeholder_format.type in ('TITLE', 'CENTER_TITLE')) or (not is_placeholder and shape.top < Pt(150)) ):
             tf = shape.text_frame
             tf.clear()
             p = tf.paragraphs[0]
@@ -83,7 +86,7 @@ def populate_slide(slide, content):
             title_populated = True
 
         # Heuristic for Body placeholder
-        elif not body_populated and (shape.placeholder_format.type in ('BODY', 'OBJECT') or "lorem ipsum" in shape.text.lower()):
+        elif not body_populated and ( (is_placeholder and shape.placeholder_format.type in ('BODY', 'OBJECT')) or "lorem ipsum" in shape.text.lower()):
             tf = shape.text_frame
             tf.clear()
             p = tf.paragraphs[0]
@@ -132,12 +135,10 @@ if template_files and gtm_file and api_key and st.session_state.structure:
         with st.spinner("Assembling your new presentation... This may take a moment."):
             try:
                 st.write("Step 1/3: Loading decks...")
-                template_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
+                # Use the first uploaded template as the base for the new presentation
+                new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
                 gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
                 
-                # CRITICAL: Start with the template as the base. No blank presentations.
-                new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
-
                 st.write("Step 2/3: Building new presentation from your structure...")
                 
                 if len(st.session_state.structure) != len(new_prs.slides):
