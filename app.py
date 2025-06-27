@@ -147,7 +147,7 @@ def deep_copy_slide_content(dest_slide, src_slide):
 def get_all_slide_data(file_bytes: bytes, file_type: str):
     """
     Extracts text content from all slides/pages of a given file (PPTX or PDF).
-    No explicit visual data is extracted or returned; assumed to be handled by AI directly.
+    Assumes AI can directly 'see' the visual content from the provided file_bytes.
     """
     all_slides_data = []
 
@@ -203,7 +203,7 @@ def find_slide_by_ai(api_key, file_bytes: bytes, file_type: str, slide_type_prom
     
     Analyze both the provided **text content** and the **visual structure** of each slide/page to infer its purpose. Assume you can directly see the visual layout, charts, and images within the document.
     
-    **For 'Timeline' slides/pages:** Look for strong textual indicators of sequential progression (dates, years, quarters, phased language like "Phase 1", "roadmap", "milestones"). **Crucially, also use visual patterns, such as horizontal or vertical arrangements of distinct elements, flow arrows, or clear segmentation over time.** Prioritize slides/pages that combine strong textual cues with implied or explicit visual timeline structures.
+    **For 'Timeline' slides/pages:** Look for strong textual indicators of sequential progression (dates, years, quarters, phased language like "Phase 1", "roadmap", "milestones"). **Crucially, also infer and describe visual patterns, such as horizontal or vertical arrangements of distinct elements, flow arrows, or clear segmentation over time. Do NOT rely solely on explicit textual labels (e.g., 'Timeline slide'). Focus on patterns that *imply* a visual timeline.** Prioritize slides/pages that combine strong textual cues with implied or explicit visual timeline structures.
 
     **For 'Objectives' slides/pages:** These will typically contain goal-oriented language, targets, key results, and strategic aims in both text and visually organized lists or impact statements.
 
@@ -264,7 +264,7 @@ def analyze_and_map_content(api_key, gtm_slide_content_data, template_slides_dat
     1.  **Select the BEST Template:**
         * **Crucially, you must review *each and every* template slide/page text summary AND its associated visual content.**
         * Semantically and **visually** evaluate which template slide's structure and implied purpose would *best* accommodate the `gtm_slide_content`. Assume you can directly see the visual layout, charts, and images within the document.
-        * **Perform a comparative analysis:** Do not just pick the first decent match. Compare all options to find the single most suitable template based on a combined understanding of text and visuals.
+        * **Perform a comparative analysis:** Do not just pick the first decent match. Compare all options to find the single most suitable template based on a combined understanding of text and visuals. **Prioritize templates where the text *implies* a strong visual match, rather than just explicitly stating a type.** For instance, a template with short, sequential bullet points and dates might be a better visual timeline fit than one that simply has "Timeline" in its title but dense paragraphs.
         * Consider factors like:
             * Does the template's textual layout (e.g., presence of sections, bullet points, titles) **and its visual layout (e.g., number of content blocks, placement of image placeholders, overall design)** match the theme/type of the GTM content.
             * Is there sufficient space or logical sections in the template for the GTM content based on its textual and visual structure?
@@ -288,13 +288,11 @@ def analyze_and_map_content(api_key, gtm_slide_content_data, template_slides_dat
         {"type": "text", "text": f"User's original keyword for this content: '{user_keyword}'"},
         {"type": "text", "text": "GTM Slide/Page Content to Process (Text):"},
         {"type": "text", "text": json.dumps(gtm_slide_content_data.get('text', {}), indent=2)},
-        # No explicit image_url here, assuming AI can directly read visuals from the file context
     ]
 
     user_parts.append({"type": "text", "text": "\nAvailable Template Slides/Pages Summary and Visuals:"})
     for slide_info in template_slides_data:
         user_parts.append({"type": "text", "text": f"\n--- Template Slide/Page {slide_info['slide_index'] + 1} (Text): {slide_info['text']}"})
-        # No explicit image_url here, assuming AI can directly read visuals from the file context
     
     messages = [
         {"role": "system", "content": system_prompt},
@@ -406,9 +404,7 @@ with st.sidebar:
     api_key = st.text_input("OpenAI API Key", type="password")
     st.markdown("---")
     st.header("2. Upload Decks")
-    # Template deck now accepts multiple PPTX or PDF files
     template_files = st.file_uploader("Upload Template Deck(s) (PPTX or PDF)", type=["pptx", "pdf"], accept_multiple_files=True)
-    # GTM Global deck accepts multiple PPTX or PDF files
     gtm_files = st.file_uploader("Upload GTM Global Deck(s) (PPTX or PDF)", type=["pptx", "pdf"], accept_multiple_files=True)
     st.markdown("---")
     st.header("3. Define Presentation Structure")
@@ -439,7 +435,10 @@ with st.sidebar:
 
 # --- Main App Logic ---
 if template_files and gtm_files and api_key and st.session_state.structure:
-    # Process only the first uploaded GTM file, and warn if multiple are uploaded
+    if not gtm_files: # Check if GTM files are uploaded
+        st.error("Please upload at least one file to the 'GTM Global Deck(s)' section.")
+        st.stop()
+
     gtm_file_to_process = gtm_files[0]
     if len(gtm_files) > 1:
         st.warning("Multiple GTM files uploaded. Only the first file will be processed.")
@@ -449,25 +448,33 @@ if template_files and gtm_files and api_key and st.session_state.structure:
             try:
                 st.write("Step 1/3: Loading decks...")
                 
-                # --- Find the base PPTX template for output ---
-                base_pptx_template = None
-                all_template_slides_for_ai = []
+                base_pptx_template_bytes = None
+                initial_pptx_loaded = False
+                new_prs = None 
+
+                all_template_slides_for_ai = [] 
+
                 for uploaded_template_file in template_files:
                     file_bytes = uploaded_template_file.getvalue()
                     file_type = uploaded_template_file.type
                     
-                    if file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation' and base_pptx_template is None:
-                        base_pptx_template = uploaded_template_file # Use the first PPTX found as base
-                        st.info(f"Using '{uploaded_template_file.name}' as the base PPTX template.")
-                    
-                    # Collect data for AI analysis from ALL template files (PPTX and PDF)
+                    if file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
+                        if not initial_pptx_loaded:
+                            new_prs = Presentation(io.BytesIO(file_bytes))
+                            st.info(f"Using '{uploaded_template_file.name}' as the primary base PPTX template.")
+                            initial_pptx_loaded = True
+                        else:
+                            current_prs_to_merge = Presentation(io.BytesIO(file_bytes))
+                            st.info(f"Merging slides from '{uploaded_template_file.name}' into the base template.")
+                            for slide_to_merge in current_prs_to_merge.slides:
+                                new_slide = new_prs.slides.add_slide(new_prs.slide_layouts[0]) 
+                                deep_copy_slide_content(new_slide, slide_to_merge) 
+
                     all_template_slides_for_ai.extend(get_all_slide_data(file_bytes, file_type))
 
-                if base_pptx_template is None:
-                    st.error("Error: A PPTX file must be uploaded in the 'Template Deck(s)' section to serve as the base for the assembled presentation.")
-                    st.stop() # Halt execution if no base PPTX is found
-
-                new_prs = Presentation(io.BytesIO(base_pptx_template.getvalue())) # Initialize from the found PPTX template
+                if new_prs is None:
+                    st.error("Error: At least one PPTX file must be uploaded in the 'Template Deck(s)' section to serve as the base for the assembled presentation.")
+                    st.stop() 
 
                 gtm_file_bytes = gtm_file_to_process.getvalue()
                 gtm_file_type = gtm_file_to_process.type 
@@ -475,7 +482,7 @@ if template_files and gtm_files and api_key and st.session_state.structure:
                 process_log = []
                 st.write("Step 2/3: Building new presentation based on your structure...")
                 
-                num_template_slides = len(new_prs.slides)
+                num_template_slides = len(new_prs.slides) 
                 num_structure_steps = len(st.session_state.structure)
 
                 if num_structure_steps < num_template_slides:
@@ -483,9 +490,9 @@ if template_files and gtm_files and api_key and st.session_state.structure:
                         rId = new_prs.slides._sldIdLst[i].rId
                         new_prs.part.drop_rel(rId)
                         del new_prs.slides._sldIdLst[i]
-                    st.info(f"Removed {num_template_slides - num_structure_steps} unused slides from the template.")
+                    st.info(f"Removed {num_template_slides - num_structure_steps} unused slides from the merged template.")
                 elif num_structure_steps > num_template_slides:
-                     st.warning(f"Warning: Your defined structure has more steps ({num_structure_steps}) than the template has slides ({num_template_slides}). Extra steps will be ignored.")
+                     st.warning(f"Warning: Your defined structure has more steps ({num_structure_steps}) than the merged template has slides ({num_template_slides}). Extra steps will be ignored.")
 
                 for i, step in enumerate(st.session_state.structure):
                     if i >= len(new_prs.slides): 
@@ -500,7 +507,7 @@ if template_files and gtm_files and api_key and st.session_state.structure:
                     log_entry = {"step": i + 1, "keyword": keyword, "action": action, "log": []}
                     
                     if action == "Copy from GTM (as is)":
-                        if gtm_file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation': # GTM is PPTX
+                        if gtm_file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation': 
                             gtm_prs = Presentation(io.BytesIO(gtm_file_bytes))
                             result = find_slide_by_ai(api_key, gtm_file_bytes, gtm_file_type, keyword, "GTM Deck")
                             log_entry["log"].append(f"**GTM Content Choice Justification (PPTX Copy):** {result['justification']}")
@@ -510,7 +517,7 @@ if template_files and gtm_files and api_key and st.session_state.structure:
                                 log_entry["log"].append(f"**Action:** Replaced Template slide {current_dest_slide_index + 1} with content from GTM PPTX slide {result['index'] + 1}.")
                             else:
                                 log_entry["log"].append("**Action:** No suitable slide found in GTM PPTX deck. Template slide was left as is.")
-                        else: # GTM is PDF for "Copy as is"
+                        else: 
                             log_entry["log"].append(f"**Warning:** 'Copy from GTM (as is)' is selected but GTM deck is a PDF. This action cannot directly copy PPTX shapes from a PDF. Proceeding with 'Merge' logic for content extraction based on text and assumed visuals.")
                             
                             gtm_ai_selection_result = find_slide_by_ai(api_key, gtm_file_bytes, gtm_file_type, keyword, "GTM Deck (Content Source)")
@@ -523,11 +530,10 @@ if template_files and gtm_files and api_key and st.session_state.structure:
                                 raw_gtm_content["title"] = lines[0] if lines else ""
                                 raw_gtm_content["body"] = "\n".join(lines[1:]) if len(lines) > 1 else ""
 
-                            # Use all_template_slides_for_ai for template data
                             ai_mapping_result = analyze_and_map_content(
                                 api_key, 
                                 raw_gtm_content,
-                                all_template_slides_for_ai, # Pass all template data (PPTX+PDF) for AI
+                                all_template_slides_for_ai, 
                                 keyword
                             )
                             log_entry["log"].append(f"**AI Template Mapping Justification (PDF Fallback Merge):** {ai_mapping_result['justification']}")
@@ -552,11 +558,10 @@ if template_files and gtm_files and api_key and st.session_state.structure:
                             raw_gtm_content["title"] = lines[0] if lines else ""
                             raw_gtm_content["body"] = "\n".join(lines[1:]) if len(lines) > 1 else ""
 
-                        # Use all_template_slides_for_ai for template data
                         ai_mapping_result = analyze_and_map_content(
                             api_key, 
                             raw_gtm_content,
-                            all_template_slides_for_ai, # Pass all template data (PPTX+PDF) for AI
+                            all_template_slides_for_ai, 
                             keyword
                         )
                         log_entry["log"].append(f"**AI Template Mapping Justification:** {ai_mapping_result['justification']}")
