@@ -6,59 +6,62 @@ import copy
 import uuid
 import openai
 import json
+from PIL import Image, ImageDraw, ImageFont
 
 # --- Core PowerPoint Functions ---
 
-def deep_copy_slide_content(dest_slide, src_slide):
+def deep_copy_slide(dest_pres, src_slide):
     """
-    Performs a stable, deep copy of all shapes from a source slide
-    to a destination slide by recreating each shape. This is the most robust method.
+    Performs a stable, deep copy of all shapes and content from a source slide
+    to a destination presentation by adding a new slide and then copying shapes.
+    This is the most robust method that avoids file corruption.
     """
-    # Clear all shapes from the destination slide first to prepare it.
+    # Use a blank layout as a base for the new slide
+    blank_layout = dest_pres.slide_layouts[6] 
+    dest_slide = dest_pres.slides.add_slide(blank_layout)
+
+    # Clear any default shapes from the blank layout
     for shape in list(dest_slide.shapes):
         sp = shape.element
         sp.getparent().remove(sp)
 
-    # Iterate through shapes in the source slide and copy their XML representation.
+    # Copy shapes from the source slide to the destination slide by duplicating their XML elements.
     for shape in src_slide.shapes:
         new_el = copy.deepcopy(shape.element)
         dest_slide.shapes._spTree.insert_element_before(new_el, 'p:extLst')
 
-def find_slide_by_ai(api_key, prs, slide_type_prompt, deck_name):
+def find_slide_candidates_by_ai(api_key, prs, slide_type_prompt, all_slides_content):
     """
-    Uses OpenAI to intelligently find the best matching slide and get a justification.
-    Returns a dictionary with the slide object, its index, and the AI's justification.
+    Uses OpenAI to intelligently find the top 3 best matching slides and get justifications.
     """
-    if not slide_type_prompt: return {"slide": None, "index": -1, "justification": "No keyword provided."}
     client = openai.OpenAI(api_key=api_key)
-    
-    slides_content = [{"slide_index": i, "text": " ".join(s.text for s in slide.shapes if s.has_text_frame)[:1000]} for i, slide in enumerate(prs.slides)]
-
     system_prompt = f"""
-    You are an expert presentation analyst. Your task is to find the best slide in a presentation that matches a user's description.
-    The user is looking for a slide representing: '{slide_type_prompt}'.
-    Analyze the text of each slide to understand its purpose. A "Timeline" slide VISUALLY represents a schedule with dates, quarters, or sequential phases (Phase 1, Phase 2); it is NOT just a list in a table of contents. An "Objectives" slide will contain goal-oriented language. You must prioritize actual content slides over simple divider or table of contents pages.
-    You MUST return a JSON object with two keys: 'best_match_index' (an integer, or -1 if no match) and 'justification' (a brief, one-sentence justification for your choice).
+    You are an expert presentation analyst. Given a JSON list of slide contents and a description ('{slide_type_prompt}'), your task is to identify the top 3 best-matching slides.
+    A "Timeline" slide VISUALLY represents a schedule with dates, quarters, or sequential phases (Phase 1, Phase 2), it is NOT just a list in a table of contents. An "Objectives" slide contains goal-oriented language. You must prioritize slides that are actual content slides over divider or table of contents pages.
+    Return a JSON object with a single key 'best_matches', which is a list of objects. Each object must have two keys: 'index' (the integer index of the slide) and 'justification' (a brief explanation for your choice). Return up to 3 matches, sorted from best to worst. If no matches are found, return an empty list.
     """
-    full_user_prompt = f"Find the best slide for '{slide_type_prompt}' in the '{deck_name}' deck with the following contents:\n{json.dumps(slides_content, indent=2)}"
-
+    full_user_prompt = f"Find the best slides for '{slide_type_prompt}' in: {json.dumps(all_slides_content, indent=2)}"
     try:
         response = client.chat.completions.create(
             model="gpt-4-turbo", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": full_user_prompt}],
             response_format={"type": "json_object"}
         )
         result = json.loads(response.choices[0].message.content)
-        best_index = result.get("best_match_index", -1)
-        justification = result.get("justification", "No justification provided.")
-        if best_index != -1 and best_index < len(prs.slides):
-            return {"slide": prs.slides[best_index], "index": best_index, "justification": justification}
-        return {"slide": None, "index": -1, "justification": "AI could not find a suitable slide."}
+        matches = result.get("best_matches", [])
+        
+        valid_matches = []
+        for match in matches:
+            idx = match.get("index")
+            if idx is not None and 0 <= idx < len(prs.slides):
+                match["slide"] = prs.slides[idx]
+                valid_matches.append(match)
+        return valid_matches
     except Exception as e:
-        return {"slide": None, "index": -1, "justification": f"An error occurred during analysis: {e}"}
+        st.error(f"AI slide analysis failed: {e}")
+        return []
 
 def get_slide_content(slide):
     """Extracts title and body text from a slide."""
-    if not slide: return {"title": "", "body": ""}
     text_boxes = sorted([s for s in slide.shapes if s.has_text_frame and s.text.strip()], key=lambda s: s.top)
     title = text_boxes[0].text if text_boxes else ""
     body = "\n".join(s.text for s in text_boxes[1:]) if len(text_boxes) > 1 else ""
@@ -71,107 +74,123 @@ def populate_slide(slide, content):
         if hasattr(shape, 'is_placeholder') and shape.is_placeholder:
             if shape.placeholder_format.type in ('TITLE', 'CENTER_TITLE'): title_shape = shape
             elif shape.placeholder_format.type in ('BODY', 'OBJECT'): body_shape = shape
-    if not body_shape: # Fallback for non-standard templates
+    if not body_shape:
          text_boxes = sorted([s for s in slide.shapes if s.has_text_frame and "lorem ipsum" in s.text.lower()], key=lambda s: s.top)
          if text_boxes: body_shape = text_boxes[0]
-    
     if title_shape:
         tf = title_shape.text_frame; tf.clear(); run = tf.add_paragraph().add_run(); run.text = content.get("title", ""); run.font.bold = True
     if body_shape:
         tf = body_shape.text_frame; tf.clear(); run = tf.add_paragraph().add_run(); run.text = content.get("body", ""); run.font.bold = True
 
+def get_slide_thumbnail(slide, index, slide_width, slide_height):
+    """Creates a 'text layout' thumbnail of a slide."""
+    THUMB_WIDTH = 400
+    THUMB_HEIGHT = int(THUMB_WIDTH * (slide_height / slide_width))
+    img = Image.new('RGB', (THUMB_WIDTH, THUMB_HEIGHT), color = '#FFFFFF')
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("Arial.ttf", 10)
+    except IOError:
+        font = ImageFont.load_default()
+    draw.rectangle([0, 0, THUMB_WIDTH - 1, THUMB_HEIGHT - 1], outline="black")
+    for shape in slide.shapes:
+        if not shape.has_text_frame: continue
+        x = int((shape.left / slide_width) * THUMB_WIDTH); y = int((shape.top / slide_height) * THUMB_HEIGHT)
+        w = int((shape.width / slide_width) * THUMB_WIDTH); h = int((shape.height / slide_height) * THUMB_HEIGHT)
+        draw.rectangle([x, y, x + w, y + h], fill="#F0F2F6", outline="#D3D3D3")
+        text = shape.text[:200] + "..." if len(shape.text) > 200 else shape.text
+        draw.text((x + 5, y + 5), text, fill=(0,0,0), font=font)
+    return img
+
 # --- Streamlit App ---
-st.set_page_config(page_title="Dynamic AI Presentation Assembler", layout="wide")
-st.title("🤖 Dynamic AI Presentation Assembler")
+st.set_page_config(page_title="Interactive AI Presentation Assembler", layout="wide")
+st.title("🤖 Interactive AI Presentation Assembler")
+
+if 'structure' not in st.session_state: st.session_state.structure = []
+if 'build_plan' not in st.session_state: st.session_state.build_plan = None
 
 with st.sidebar:
     st.header("1. API Key & Decks")
     api_key = st.text_input("OpenAI API Key", type="password")
-    st.markdown("---")
-    st.header("2. Upload Decks")
     template_files = st.file_uploader("Upload Template Deck(s)", type=["pptx"], accept_multiple_files=True)
     gtm_file = st.file_uploader("Upload GTM Global Deck", type=["pptx"])
     st.markdown("---")
-    st.header("3. Define Presentation Structure")
-    
-    if 'structure' not in st.session_state: st.session_state.structure = []
-    
+    st.header("2. Define Presentation Structure")
     if st.button("Add New Step", use_container_width=True):
-        st.session_state.structure.append({"id": str(uuid.uuid4()), "keyword": "", "action": "Copy from GTM (as is)"})
-
+        st.session_state.structure.append({"id": str(uuid.uuid4()), "keyword": "", "action": "Copy from GTM (as is)", "user_selection": 0})
     for i, step in enumerate(st.session_state.structure):
         with st.container(border=True):
-            cols = st.columns([3, 3, 1]); step["keyword"] = cols[0].text_input("Slide Type", step["keyword"], key=f"keyword_{step['id']}")
+            cols = st.columns([3, 3, 1])
+            step["keyword"] = cols[0].text_input("Slide Type", step["keyword"], key=f"keyword_{step['id']}")
             step["action"] = cols[1].selectbox("Action", ["Copy from GTM (as is)", "Merge: Template Layout + GTM Content"], index=["Copy from GTM (as is)", "Merge: Template Layout + GTM Content"].index(step["action"]), key=f"action_{step['id']}")
-            if cols[2].button("🗑️", key=f"del_{step['id']}"): st.session_state.structure.pop(i); st.rerun()
-    if st.button("Clear Structure", use_container_width=True): st.session_state.structure = []; st.rerun()
+            if cols[2].button("🗑️", key=f"del_{step['id']}"):
+                st.session_state.structure.pop(i); st.rerun()
+    if st.button("Clear Structure", use_container_width=True):
+        st.session_state.structure = []; st.session_state.build_plan = None; st.rerun()
 
 # --- Main App Logic ---
 if template_files and gtm_file and api_key and st.session_state.structure:
-    if st.button("🚀 Assemble Presentation", type="primary"):
-        with st.spinner("Assembling your new presentation..."):
-            try:
-                st.write("Step 1/3: Loading decks...")
-                # CRITICAL: Use the first template as the base for the new presentation.
-                new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
-                gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
-                
-                process_log = []
-                st.write("Step 2/3: Building new presentation based on your structure...")
-                
-                if len(st.session_state.structure) > len(new_prs.slides):
-                    st.warning(f"Warning: Your defined structure has more steps ({len(st.session_state.structure)}) than the template has slides ({len(new_prs.slides)}). Extra steps will be ignored.")
+    if st.button("1. Generate Build Plan", type="primary"):
+        with st.spinner("Analyzing decks and creating initial plan..."):
+            template_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
+            gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
+            template_content = [{"slide_index": i, "text": " ".join(s.text for s in slide.shapes if s.has_text_frame)[:1000]} for i, slide in enumerate(template_prs.slides)]
+            gtm_content = [{"slide_index": i, "text": " ".join(s.text for s in slide.shapes if s.has_text_frame)[:1000]} for i, slide in enumerate(gtm_prs.slides)]
+            plan = []
+            for step in st.session_state.structure:
+                keyword, action = step["keyword"], step["action"]
+                item = {"keyword": keyword, "action": action, "template_choices": [], "gtm_choice": None, "user_selection": 0}
+                if action == "Copy from GTM (as is)":
+                    result = find_slide_candidates_by_ai(api_key, gtm_prs, keyword, gtm_content)
+                    if result: item["gtm_choice"] = result[0]
+                elif action == "Merge: Template Layout + GTM Content":
+                    item["template_choices"] = find_slide_candidates_by_ai(api_key, template_prs, keyword, template_content)
+                    content_result = find_slide_candidates_by_ai(api_key, gtm_prs, keyword, gtm_content)
+                    if content_result: item["gtm_choice"] = content_result[0]
+                plan.append(item)
+            st.session_state.build_plan = plan
+            st.session_state.template_prs = template_prs
+            st.session_state.gtm_prs = gtm_prs
 
-                for i, dest_slide in enumerate(new_prs.slides):
-                    if i >= len(st.session_state.structure):
-                        break # Stop if we've run out of defined steps
+if st.session_state.build_plan:
+    st.markdown("---"); st.header("3. Review and Approve Build Plan")
+    for i, item in enumerate(st.session_state.build_plan):
+        with st.container(border=True):
+            st.subheader(f"Step {i+1}: '{item['keyword']}' ({item['action']})")
+            if item['action'] == "Merge: Template Layout + GTM Content":
+                st.write("**Select a Layout from the Template Deck:**")
+                if item["template_choices"]:
+                    options = [f"Option {j+1} (Slide {choice['index']+1})" for j, choice in enumerate(item["template_choices"])]
+                    selection_index = st.radio("Layout Options", range(len(options)), format_func=lambda x: options[x], key=f"select_{item['keyword']}", horizontal=True, index=item['user_selection'])
+                    item['user_selection'] = selection_index
+                    cols = st.columns(len(item["template_choices"]))
+                    for j, choice in enumerate(item["template_choices"]):
+                        with cols[j]:
+                            st.image(get_slide_thumbnail(choice['slide'], choice['index'], st.session_state.template_prs.slide_width, st.session_state.template_prs.slide_height), use_column_width=True)
+                            st.info(f"AI says: {choice['justification']}")
+                else:
+                    st.warning("AI found no suitable layouts in the Template Deck.")
+            
+            if item['gtm_choice'] and item['gtm_choice']['slide']:
+                 st.write("**Content Source from GTM Deck:**")
+                 st.image(get_slide_thumbnail(item['gtm_choice']['slide'], item['gtm_choice']['index'], st.session_state.gtm_prs.slide_width, st.session_state.gtm_prs.slide_height))
+                 st.info(f"AI Justification: {item['gtm_choice']['justification']}")
 
-                    step = st.session_state.structure[i]
-                    keyword, action = step["keyword"], step["action"]
-                    log_entry = {"step": i + 1, "keyword": keyword, "action": action, "log": []}
-                    
-                    if action == "Copy from GTM (as is)":
-                        result = find_slide_by_ai(api_key, gtm_prs, keyword, "GTM Deck")
-                        log_entry["log"].append(f"**GTM Content Choice Justification:** {result['justification']}")
-                        if result["slide"]:
-                            deep_copy_slide_content(dest_slide, result["slide"])
-                            log_entry["log"].append(f"**Action:** Replaced Template slide {i + 1} with content from GTM slide {result['index'] + 1}.")
-                        else:
-                            log_entry["log"].append("**Action:** No suitable slide found in GTM deck. Template slide was left as is.")
-                    
-                    elif action == "Merge: Template Layout + GTM Content":
-                        content_result = find_slide_by_ai(api_key, gtm_prs, keyword, "GTM Deck")
-                        log_entry["log"].append(f"**GTM Content Choice Justification:** {content_result['justification']}")
-                        if content_result["slide"]:
-                            content = get_slide_content(content_result["slide"])
-                            populate_slide(dest_slide, content)
-                            log_entry["log"].append(f"**Action:** Merged content from GTM slide {content_result['index'] + 1} into Template slide {i+1}.")
-                        else:
-                             log_entry["log"].append("**Action:** No suitable content found in GTM deck. Template slide was left as is.")
-                    
-                    process_log.append(log_entry)
-
-                # Prune any unused slides from the end of the template
-                num_to_delete = len(new_prs.slides) - len(st.session_state.structure)
-                if num_to_delete > 0:
-                    for i in range(len(new_prs.slides) - 1, len(st.session_state.structure) - 1, -1):
-                        rId = new_prs.slides._sldIdLst[i].rId
-                        new_prs.part.drop_rel(rId)
-                        del new_prs.slides._sldIdLst[i]
-
-                st.success("Successfully built the new presentation structure.")
-                
-                st.write("Step 3/3: Finalizing...")
-                st.subheader("📋 Process Log")
-                for entry in process_log:
-                    with st.expander(f"Step {entry['step']}: '{entry['keyword']}' ({entry['action']})"):
-                        for line in entry['log']: st.markdown(f"- {line}")
-                
-                output_buffer = io.BytesIO(); new_prs.save(output_buffer); output_buffer.seek(0)
-                st.success("🎉 Your new regional presentation has been assembled!")
-                st.download_button("Download Assembled PowerPoint", data=output_buffer, file_name="Dynamic_AI_Assembled_Deck.pptx")
-            except Exception as e:
-                st.error(f"A critical error occurred: {e}"); st.exception(e)
-else:
-    st.info("Please provide an API Key, upload at least one Template Deck and a GTM Deck, and define the structure in the sidebar to begin.")
-
+    st.markdown("---")
+    if st.button("2. Assemble Final Presentation", type="primary"):
+        with st.spinner("Executing final assembly..."):
+            final_prs = Presentation(); final_prs.slide_width = st.session_state.template_prs.slide_width; final_prs.slide_height = st.session_state.template_prs.slide_height
+            for item in st.session_state.build_plan:
+                if item['action'] == "Copy from GTM (as is)":
+                    if item['gtm_choice'] and item['gtm_choice']['slide']:
+                        deep_copy_slide(final_prs, item['gtm_choice']['slide'])
+                elif item['action'] == "Merge: Template Layout + GTM Content":
+                    if item['template_choices'] and item['gtm_choice'] and item['gtm_choice']['slide']:
+                        selected_layout_slide = item['template_choices'][item['user_selection']]['slide']
+                        content = get_slide_content(item['gtm_choice']['slide'])
+                        new_slide = final_prs.slides.add_slide(selected_layout_slide.slide_layout)
+                        populate_slide(new_slide, content)
+            
+            output_buffer = io.BytesIO(); final_prs.save(output_buffer); output_buffer.seek(0)
+            st.success("🎉 Your presentation has been assembled!"); st.download_button("Download Assembled PowerPoint", data=output_buffer, file_name="Interactive_AI_Assembled_Deck.pptx")
+            st.session_state.build_plan = None
