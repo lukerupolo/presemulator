@@ -146,12 +146,14 @@ def display_summary(original_data, modified_data):
         
         with col1:
             st.markdown("**Before**")
-            st.text_area("Title", value=original['title'], height=50, disabled=True, key=f"orig_title_{original['slide_number']}")
+            # FIX: Increased height from 50 to 70 to meet Streamlit requirements
+            st.text_area("Title", value=original['title'], height=70, disabled=True, key=f"orig_title_{original['slide_number']}")
             st.text_area("Body", value=original['body'], height=200, disabled=True, key=f"orig_body_{original['slide_number']}")
 
         with col2:
             st.markdown("**After**")
-            st.text_area("Title", value=modified['title'], height=50, disabled=True, key=f"mod_title_{modified['slide_number']}")
+            # FIX: Increased height from 50 to 70 to meet Streamlit requirements
+            st.text_area("Title", value=modified['title'], height=70, disabled=True, key=f"mod_title_{modified['slide_number']}")
             st.text_area("Body", value=modified['body'], height=200, disabled=True, key=f"mod_body_{modified['slide_number']}")
 
 # --- Streamlit App ---
@@ -205,7 +207,6 @@ if uploaded_file is not None:
 
                         st.success("🎉 Your presentation has been successfully modified!")
                         
-                        # --- NEW: Display the summary of changes ---
                         display_summary(original_data, modified_data)
 
                         st.download_button(
