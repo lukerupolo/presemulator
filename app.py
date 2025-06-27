@@ -66,26 +66,22 @@ def get_slide_content(slide):
 
 def populate_slide(slide, content):
     """Populates a slide's placeholders with new content, making it bold."""
-    title_shape, body_shape = None, None
+    title_populated, body_populated = False, False
     for shape in slide.shapes:
-        if hasattr(shape, 'is_placeholder') and shape.is_placeholder:
-            if shape.placeholder_format.type in ('TITLE', 'CENTER_TITLE'): title_shape = shape
-            elif shape.placeholder_format.type in ('BODY', 'OBJECT'): body_shape = shape
-    if not body_shape:
-         text_boxes = sorted([s for s in slide.shapes if s.has_text_frame and "lorem ipsum" in s.text.lower()], key=lambda s: s.top)
-         if text_boxes: body_shape = text_boxes[0]
-    
-    if title_shape:
-        tf = title_shape.text_frame; tf.clear(); run = tf.add_paragraph().add_run(); run.text = content.get("title", ""); run.font.bold = True
-    if body_shape:
-        tf = body_shape.text_frame; tf.clear(); run = tf.add_paragraph().add_run(); run.text = content.get("body", ""); run.font.bold = True
+        if not shape.has_text_frame: continue
+        is_placeholder = hasattr(shape, 'is_placeholder') and shape.is_placeholder
+        
+        if not title_populated and ((is_placeholder and shape.placeholder_format.type in ('TITLE', 'CENTER_TITLE')) or (not is_placeholder and shape.top < Pt(150))):
+            tf = shape.text_frame; tf.clear(); p = tf.add_paragraph(); run = p.add_run(); run.text = content.get("title", ""); run.font.bold = True; title_populated = True
+        elif not body_populated and ((is_placeholder and shape.placeholder_format.type in ('BODY', 'OBJECT')) or "lorem ipsum" in shape.text.lower()):
+            tf = shape.text_frame; tf.clear(); p = tf.add_paragraph(); run = p.add_run(); run.text = content.get("body", ""); run.font.bold = True; body_populated = True
 
 # --- Streamlit App ---
 st.set_page_config(page_title="Dynamic AI Presentation Assembler", layout="wide")
 st.title("🤖 Dynamic AI Presentation Assembler")
 
 with st.sidebar:
-    st.header("1. API Key & Decks")
+    st.header("1. API Key")
     api_key = st.text_input("OpenAI API Key", type="password")
     st.markdown("---")
     st.header("2. Upload Decks")
@@ -112,7 +108,7 @@ if template_files and gtm_file and api_key and st.session_state.structure:
         with st.spinner("Assembling your new presentation..."):
             try:
                 st.write("Step 1/3: Loading decks...")
-                # CRITICAL FIX: Use the first template as the base for the new presentation.
+                # CRITICAL: Use the first template as the base for the new presentation.
                 new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
                 gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
                 
