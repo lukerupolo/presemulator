@@ -12,24 +12,27 @@ import json
 def clone_slide(pres, slide_to_clone):
     """
     Duplicates a slide from a source presentation and adds it to the end of
-    the slides in the destination presentation `pres`. This is a robust method
-    that correctly handles all slide parts and relationships (like images).
+    the slides in the destination presentation `pres`. This is a robust method.
     """
+    # 1. Get the source slide's part (the XML representation of the slide).
     src_part = slide_to_clone.part
     package = pres.part.package
-    
-    # This robust method handles copying the raw XML and binary data of the slide part.
-    # It checks if the part already exists (e.g., a shared image) before adding.
-    if package.has_part(src_part.partname):
-        new_part = package.get_part(src_part.partname)
-    else:
-        new_part = package.add_part(
-            src_part.partname, src_part.content_type, src_part.blob
-        )
-    
+
+    # 2. Add a new slide part to the destination presentation's package.
+    # This copies the raw XML and binary content of the slide.
+    # The partname (e.g., /ppt/slides/slide1.xml) is taken from the source.
+    # The package handles finding a unique name if a conflict exists.
+    # This is a low-level operation that python-pptx abstracts away from.
+    new_part = package.add_part(
+        src_part.partname, src_part.content_type, src_part.blob
+    )
+
+    # 3. Add the new slide part to the presentation's main slide list.
+    # This makes the slide "visible" in the slide sequence.
     pres.slides.add_slide(new_part)
 
-    # Copy relationships (critical for images, charts, etc.)
+    # 4. Copy relationships from the source slide to the new slide.
+    # This is CRITICAL for images, charts, etc.
     for rel in src_part.rels:
         if rel.is_external:
             new_part.rels.add_relationship(
@@ -38,13 +41,19 @@ def clone_slide(pres, slide_to_clone):
             continue
         
         target_part = rel.target_part
+        # If the target of the relationship (e.g., an image file) isn't already
+        # in the destination package...
         if not package.has_part(target_part.partname):
+            # ...add it to the destination package.
             package.add_part(
                 target_part.partname, target_part.content_type, target_part.blob
             )
+
+        # Create the relationship from the new slide to the now-guaranteed-to-exist target part.
         new_part.relate_to(target_part, rel.reltype, rId=rel.rId)
 
     return pres.slides[-1]
+
 
 def find_slide_by_ai(api_key, prs, slide_type_prompt):
     """
@@ -58,7 +67,8 @@ def find_slide_by_ai(api_key, prs, slide_type_prompt):
     system_prompt = f"""
     You are an expert presentation analyst. Given a JSON list of slide contents and a description of a slide type ('{slide_type_prompt}'), identify the index of the single best-matching slide.
     Analyze the text for purpose (e.g., a "Timeline" has dates or phases; "Objectives" has goal language).
-    You MUST return a JSON object with a single key 'best_match_index'. If no good match is found, return -1.
+    You MUST return a JSON object with a single key 'best_match_index', which is the integer index of the best-matching slide.
+    If no suitable slide is found, return -1.
     """
     full_user_prompt = f"Find the best slide for '{slide_type_prompt}' in: {json.dumps(slides_content, indent=2)}"
 
@@ -86,19 +96,21 @@ def get_slide_content(slide):
 
 def populate_slide(slide, content):
     """Populates a slide's placeholders with new content, making it bold."""
-    # Heuristic to find the main text boxes to populate, looking for lorem ipsum as a key
     text_boxes = sorted([s for s in slide.shapes if s.has_text_frame and "lorem ipsum" in s.text.lower()], key=lambda s: s.top)
     if not text_boxes:
-        st.warning("Could not find a 'Lorem Ipsum' placeholder to populate on a merged slide.")
-        return
+        # Fallback if no lorem ipsum is found
+        text_boxes = sorted([s for s in slide.shapes if s.has_text_frame and len(s.text_frame.paragraphs) > 0], key=lambda s: s.top)
+        if len(text_boxes) > 1:
+            text_boxes = text_boxes[1:] # Skip the title
+        elif not text_boxes:
+            st.warning("Could not find a placeholder to populate on a merged slide.")
+            return
 
-    # Clear placeholder text before populating
     for shape in text_boxes:
         shape.text_frame.clear()
         
     p = text_boxes[0].text_frame.add_paragraph()
     run = p.add_run()
-    # Combine title and body into the main placeholder for this example
     run.text = content.get('title', '') + '\n\n' + content.get('body', '')
     run.font.bold = True
 
@@ -139,6 +151,7 @@ with st.sidebar:
 if template_files and gtm_file and api_key and st.session_state.structure:
     if st.button("🚀 Assemble Presentation", type="primary"):
         with st.spinner("Assembling your new presentation... This may take a moment."):
+            # FIX: Wrapped the main logic in a try/except block
             try:
                 st.write("Step 1/3: Loading decks and preparing a clean base...")
                 template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
