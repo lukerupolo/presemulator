@@ -11,18 +11,18 @@ import json
 
 def deep_copy_slide(dest_slide, src_slide):
     """
-    Performs a deep copy of shapes and content from a source slide to a destination slide.
-    This is a stable alternative to cloning parts between presentations.
+    Performs a stable, deep copy of all shapes and content from a source slide
+    to a destination slide. This is the most robust method for "Copy from GTM".
     """
-    # Clear all shapes from the destination slide first
+    # Clear all shapes from the destination slide first to prepare it.
     for shape in list(dest_slide.shapes):
         sp = shape.element
         sp.getparent().remove(sp)
 
-    # Copy shapes from source to destination
+    # Iterate through shapes in the source slide and copy them to the destination.
     for shape in src_slide.shapes:
-        new_shape_el = copy.deepcopy(shape.element)
-        dest_slide.shapes._spTree.insert_element_before(new_shape_el, 'p:extLst')
+        new_el = copy.deepcopy(shape.element)
+        dest_slide.shapes._spTree.insert_element_before(new_el, 'p:extLst')
 
 def find_slide_by_ai(api_key, prs, slide_type_prompt):
     """Uses OpenAI to intelligently find the best matching slide in a presentation."""
@@ -61,24 +61,37 @@ def get_slide_content(slide):
     return {"title": title, "body": body}
 
 def populate_slide(slide, content):
-    """Populates a slide's placeholders with new content, making it bold."""
-    text_boxes = sorted([s for s in slide.shapes if s.has_text_frame and "lorem ipsum" in s.text.lower()], key=lambda s: s.top)
-    if not text_boxes:
-        text_boxes = sorted([s for s in slide.shapes if s.has_text_frame and len(s.text_frame.paragraphs) > 0], key=lambda s: s.top)
-        if len(text_boxes) > 1:
-            text_boxes = text_boxes[1:]
-        elif not text_boxes:
-            st.warning("Could not find a placeholder to populate on a merged slide.")
-            return
-    
-    # Heuristic: combine title and body into the first placeholder found
-    target_shape = text_boxes[0]
-    tf = target_shape.text_frame
-    tf.clear()
-    p = tf.add_paragraph()
-    run = p.add_run()
-    run.text = content.get('title', '') + '\n\n' + content.get('body', '')
-    run.font.bold = True
+    """
+    Populates a slide's placeholders with new content, preserving formatting by
+    replacing text in existing runs.
+    """
+    title_populated, body_populated = False, False
+
+    # A more robust way to find title and body placeholders
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        
+        # Heuristic for Title placeholder
+        if not title_populated and (shape.placeholder_format.type in ('TITLE', 'CENTER_TITLE') or shape.top < Pt(150)):
+            tf = shape.text_frame
+            tf.clear()
+            p = tf.paragraphs[0]
+            run = p.add_run()
+            run.text = content.get("title", "")
+            run.font.bold = True
+            title_populated = True
+
+        # Heuristic for Body placeholder
+        elif not body_populated and (shape.placeholder_format.type in ('BODY', 'OBJECT') or "lorem ipsum" in shape.text.lower()):
+            tf = shape.text_frame
+            tf.clear()
+            p = tf.paragraphs[0]
+            run = p.add_run()
+            run.text = content.get("body", "")
+            run.font.bold = True
+            body_populated = True
+
 
 # --- Streamlit App ---
 st.set_page_config(page_title="Dynamic AI Presentation Assembler", layout="wide")
@@ -119,51 +132,43 @@ if template_files and gtm_file and api_key and st.session_state.structure:
         with st.spinner("Assembling your new presentation... This may take a moment."):
             try:
                 st.write("Step 1/3: Loading decks...")
-                # Load all decks into memory
-                template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
+                template_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
                 gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
                 
-                # CRITICAL FIX: Use the first template as the base for the new presentation.
-                # This ensures the final deck has the correct master slides and themes.
+                # CRITICAL: Start with the template as the base. No blank presentations.
                 new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
 
-                # Create a build plan based on the user's defined structure
-                build_plan = []
-                for step in st.session_state.structure:
+                st.write("Step 2/3: Building new presentation from your structure...")
+                
+                if len(st.session_state.structure) != len(new_prs.slides):
+                    st.warning(f"Warning: Your defined structure has {len(st.session_state.structure)} steps, but the template has {len(new_prs.slides)} slides. The output will match the template's slide count.")
+
+                # Iterate through the slides of the new presentation (which is a copy of the template)
+                for i, dest_slide in enumerate(new_prs.slides):
+                    if i >= len(st.session_state.structure):
+                        break 
+                    
+                    step = st.session_state.structure[i]
                     keyword = step["keyword"]
                     action = step["action"]
-                    
+                    st.write(f"  - Modifying slide {i+1} for '{keyword}' with action '{action}'")
+
                     if action == "Copy from GTM (as is)":
-                        slide = find_slide_by_ai(api_key, gtm_prs, keyword)
-                        if slide:
-                            build_plan.append({"action": "clone", "source_slide": slide})
+                        src_slide = find_slide_by_ai(api_key, gtm_prs, keyword)
+                        if src_slide:
+                            deep_copy_slide(dest_slide, src_slide)
+                            st.success(f"  - Deep copied content for '{keyword}'.")
                         else:
-                            st.warning(f"AI could not find '{keyword}' in GTM Deck. Skipping.")
-                    
+                            st.warning(f"  - AI could not find '{keyword}' in GTM Deck. Leaving template slide as is.")
+
                     elif action == "Merge: Template Layout + GTM Content":
-                        layout_slide = find_slide_by_ai(api_key, template_prs_list[0], keyword)
                         content_slide = find_slide_by_ai(api_key, gtm_prs, keyword)
-                        if layout_slide and content_slide:
+                        if content_slide:
                             content = get_slide_content(content_slide)
-                            build_plan.append({"action": "merge", "layout_slide": layout_slide, "content": content})
+                            populate_slide(dest_slide, content)
+                            st.success(f"  - Merged content for '{keyword}'.")
                         else:
-                            if not layout_slide: st.warning(f"AI could not find layout for '{keyword}' in Template. Skipping.")
-                            if not content_slide: st.warning(f"AI could not find content for '{keyword}' in GTM Deck. Skipping.")
-
-                # Clear all slides from the base presentation to create a clean canvas
-                for i in range(len(new_prs.slides) - 1, -1, -1):
-                    rId = new_prs.slides._sldIdLst[i].rId
-                    new_prs.part.drop_rel(rId)
-                    del new_prs.slides._sldIdLst[i]
-
-                st.write("Step 2/3: Building new presentation from plan...")
-                # Execute the build plan
-                for item in build_plan:
-                    if item["action"] == "clone":
-                        deep_copy_slide(new_prs.slides.add_slide(new_prs.slide_layouts[6]), item["source_slide"])
-                    elif item["action"] == "merge":
-                        new_slide = new_prs.slides.add_slide(item["layout_slide"].slide_layout)
-                        populate_slide(new_slide, item["content"])
+                            st.warning(f"  - AI could not find content for '{keyword}' in GTM Deck. Leaving template slide as is.")
 
                 st.success("Successfully built the new presentation structure.")
                 st.write("Step 3/3: Finalizing and preparing download...")
