@@ -9,17 +9,21 @@ import json
 
 # --- Core PowerPoint Functions ---
 
-def deep_copy_slide_content(dest_slide, src_slide):
+def deep_copy_slide(dest_pres, src_slide):
     """
-    Performs a stable, deep copy of all shapes from a source slide
-    to a destination slide by recreating each shape. This is the most robust method.
+    Performs a stable, deep copy of a source slide into a destination presentation.
+    This is the most robust method for the "Copy from GTM" action.
     """
-    # Clear all shapes from the destination slide first to prepare it.
+    # Use a blank layout as a base for the new slide
+    blank_layout = dest_pres.slide_layouts[6] 
+    dest_slide = dest_pres.slides.add_slide(blank_layout)
+
+    # Clear any default shapes from the blank layout
     for shape in list(dest_slide.shapes):
         sp = shape.element
         sp.getparent().remove(sp)
 
-    # Iterate through shapes in the source slide and copy their XML representation.
+    # Copy shapes from the source slide to the destination slide by duplicating their XML elements.
     for shape in src_slide.shapes:
         new_el = copy.deepcopy(shape.element)
         dest_slide.shapes._spTree.insert_element_before(new_el, 'p:extLst')
@@ -61,6 +65,7 @@ def find_slide_in_templates(api_key, template_prs_list, slide_type_prompt):
     for i, prs in enumerate(template_prs_list):
         result = find_slide_by_ai(api_key, prs, slide_type_prompt, f"Template Deck {i+1}")
         if result and result["slide"]:
+            # Return the first good match found across all templates
             return result
     return {"slide": None, "index": -1, "justification": "Could not find a suitable layout in any template deck."}
 
@@ -79,7 +84,7 @@ def populate_slide(slide, content):
         if hasattr(shape, 'is_placeholder') and shape.is_placeholder:
             if shape.placeholder_format.type in ('TITLE', 'CENTER_TITLE'): title_shape = shape
             elif shape.placeholder_format.type in ('BODY', 'OBJECT'): body_shape = shape
-    if not body_shape:
+    if not body_shape: # Fallback for non-standard templates
          text_boxes = sorted([s for s in slide.shapes if s.has_text_frame and "lorem ipsum" in s.text.lower()], key=lambda s: s.top)
          if text_boxes: body_shape = text_boxes[0]
     
@@ -123,20 +128,15 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                 template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
                 gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
                 
-                # CRITICAL FIX: Use the first template as the base for the new presentation.
-                new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
+                # Create a new, blank presentation and set its dimensions from the first template
+                new_prs = Presentation()
+                new_prs.slide_width = template_prs_list[0].slide_width
+                new_prs.slide_height = template_prs_list[0].slide_height
                 
                 process_log = []
-                st.write("Step 2/3: Building new presentation based on your structure...")
+                st.write("Step 2/3: Building new presentation from your defined structure...")
                 
-                if len(st.session_state.structure) > len(new_prs.slides):
-                    st.warning(f"Warning: Your defined structure has more steps ({len(st.session_state.structure)}) than the template has slides ({len(new_prs.slides)}). Extra steps will be ignored, and the final deck will have {len(new_prs.slides)} slides.")
-
-                for i, dest_slide in enumerate(new_prs.slides):
-                    if i >= len(st.session_state.structure):
-                        break # Stop if we've run out of defined steps
-
-                    step = st.session_state.structure[i]
+                for i, step in enumerate(st.session_state.structure):
                     keyword, action = step["keyword"], step["action"]
                     log_entry = {"step": i + 1, "keyword": keyword, "action": action, "log": []}
                     
@@ -144,30 +144,27 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                         result = find_slide_by_ai(api_key, gtm_prs, keyword, "GTM Deck")
                         log_entry["log"].append(f"**GTM Content Choice Justification:** {result['justification']}")
                         if result["slide"]:
-                            deep_copy_slide_content(dest_slide, result["slide"])
-                            log_entry["log"].append(f"**Action:** Replaced Template slide {i + 1} with content from GTM slide {result['index'] + 1}.")
+                            deep_copy_slide(new_prs, result["slide"])
+                            log_entry["log"].append(f"**Action:** Copied slide {result['index'] + 1} from GTM Deck into the new presentation.")
                         else:
-                            log_entry["log"].append("**Action:** No suitable slide found in GTM deck. Template slide was left as is.")
+                            log_entry["log"].append("**Action:** No suitable slide found in GTM deck. This step was skipped.")
                     
                     elif action == "Merge: Template Layout + GTM Content":
+                        layout_result = find_slide_in_templates(api_key, template_prs_list, keyword)
                         content_result = find_slide_by_ai(api_key, gtm_prs, keyword, "GTM Deck")
+                        
+                        log_entry["log"].append(f"**Template Layout Choice Justification:** {layout_result['justification']}")
                         log_entry["log"].append(f"**GTM Content Choice Justification:** {content_result['justification']}")
-                        if content_result["slide"]:
+
+                        if layout_result["slide"] and content_result["slide"]:
                             content = get_slide_content(content_result["slide"])
-                            populate_slide(dest_slide, content)
-                            log_entry["log"].append(f"**Action:** Merged content from GTM slide {content_result['index'] + 1} into Template slide {i+1}.")
+                            new_slide = new_prs.slides.add_slide(layout_result["slide"].slide_layout)
+                            populate_slide(new_slide, content)
+                            log_entry["log"].append(f"**Action:** Merged content from GTM slide {content_result['index'] + 1} into a new slide using the layout from Template slide {layout_result['index'] + 1}.")
                         else:
-                             log_entry["log"].append("**Action:** No suitable content found in GTM deck. Template slide was left as is.")
+                             log_entry["log"].append("**Action:** Could not find both a suitable layout and content. This step was skipped.")
                     
                     process_log.append(log_entry)
-
-                # Prune any unused slides from the end of the template
-                num_to_delete = len(new_prs.slides) - len(st.session_state.structure)
-                if num_to_delete > 0:
-                    for i in range(len(new_prs.slides) - 1, len(st.session_state.structure) - 1, -1):
-                        rId = new_prs.slides._sldIdLst[i].rId
-                        new_prs.part.drop_rel(rId)
-                        del new_prs.slides._sldIdLst[i]
 
                 st.success("Successfully built the new presentation structure.")
                 
