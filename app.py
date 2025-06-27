@@ -218,7 +218,7 @@ def find_slide_by_ai(api_key, file_bytes: bytes, file_type: str, slide_type_prom
 
     You must prioritize actual content slides/pages over simple divider or table of contents pages.
     Return a JSON object with 'best_match_index' (integer, or -1) and 'justification' (brief, one-sentence).
-    """
+    """ # CORRECTED: Removed extraneous '}]' from here
 
     user_parts = [
         {"type": "text", "text": f"Find the best slide/page for '{slide_type_prompt}' in the '{deck_name}' with the following pages/slides:"}
@@ -239,7 +239,7 @@ def find_slide_by_ai(api_key, file_bytes: bytes, file_type: str, slide_type_prom
     ]
 
     try:
-        response = openai.OpenAI(api_key=api_key).chat.completions.create( # Use client directly
+        response = openai.OpenAI(api_key=api_key).chat.completions.create(
             model="gpt-4o", # Changed model to gpt-4o for multimodal
             messages=messages,
             response_format={"type": "json_object"}
@@ -297,7 +297,7 @@ def analyze_and_map_content(api_key, gtm_slide_content_data, template_slides_dat
     -   `justification`: A brief, one-sentence justification for choosing that template, explicitly mentioning why it's better than other contenders if applicable.
     -   `processed_content`: An object with 'title' and 'body' keys, containing the
         GTM content with regional placeholders inserted.
-    """}]
+    """ # CORRECTED: Removed extraneous '}]' from here
     
     user_parts = [
         {"type": "text", "text": f"User's original keyword for this content: '{user_keyword}'"},
@@ -498,7 +498,6 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                         action = "Merge: Template Layout + GTM Content" 
                     
                     if action == "Merge: Template Layout + GTM Content":
-                        # For PDF GTM, get content and placeholder visual for AI analysis
                         gtm_ai_selection_result = find_slide_by_ai(api_key, gtm_file_bytes, 'pdf', keyword, "GTM Deck (Content Source)")
                         log_entry["log"].append(f"**GTM Content Source Justification:** {gtm_ai_selection_result['justification']}")
                         
