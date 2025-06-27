@@ -1,5 +1,6 @@
 import streamlit as st
 from pptx import Presentation
+from pptx.util import Pt  # <--- FIX: Added this import statement
 import openai
 import io
 import os
@@ -95,17 +96,20 @@ def update_presentation_with_new_text(prs, new_texts):
         # Heuristic: Find the largest text placeholder (body) to replace content
         body_shape = None
         for shape in slide.placeholders:
+            # Check for body or object placeholders which typically hold the main content
             if shape.placeholder_format.type in ('BODY', 'OBJECT'):
                  body_shape = shape
                  break
         
-        # Fallback: find the shape with the most text if no body placeholder
+        # Fallback: find the shape with the most text if no standard body placeholder is found
         if not body_shape:
-            max_text_len = 0
+            max_text_len = -1 # Use -1 to ensure any shape with text is chosen
+            candidate_shape = None
             for shape in slide.shapes:
                 if shape.has_text_frame and len(shape.text) > max_text_len:
                     max_text_len = len(shape.text)
-                    body_shape = shape
+                    candidate_shape = shape
+            body_shape = candidate_shape
         
         if body_shape:
             text_frame = body_shape.text_frame
@@ -128,69 +132,4 @@ st.write("This application uses AI to analyze and rewrite the content of your Po
 
 # --- Sidebar for Inputs ---
 with st.sidebar:
-    st.header("Controls")
-    api_key = st.text_input("Enter your OpenAI API Key", type="password")
     
-    st.markdown("---")
-    
-    uploaded_file = st.file_uploader("1. Upload a PowerPoint (.pptx)", type=["pptx"])
-    
-    st.markdown("---")
-
-    user_prompt = st.text_area(
-        "2. Enter your editing instruction",
-        height=150,
-        placeholder="e.g., 'Rewrite the objectives on these slides to reflect an Australian market perspective.' or 'Summarize the key points on each slide into three bullet points.'"
-    )
-
-# --- Main App Logic ---
-if uploaded_file is not None:
-    original_filename = uploaded_file.name
-    
-    if st.button("✨ Process Presentation with AI", type="primary"):
-        if not api_key:
-            st.error("Please enter your OpenAI API key in the sidebar.")
-        elif not user_prompt:
-            st.error("Please enter an instruction for the AI in the sidebar.")
-        else:
-            with st.spinner("Processing your presentation... This may take a moment."):
-                try:
-                    # 1. Load presentation and extract text
-                    st.write("Step 1/4: Reading your presentation...")
-                    file_content = uploaded_file.getvalue()
-                    prs = Presentation(io.BytesIO(file_content))
-                    original_texts = extract_text_from_pptx(prs)
-
-                    # 2. Send to AI for modification
-                    st.write("Step 2/4: Asking the AI to rewrite the content...")
-                    modified_texts = get_ai_modified_content(api_key, original_texts, user_prompt)
-
-                    if modified_texts:
-                        # 3. Update the presentation with new text
-                        st.write("Step 3/4: Updating the slides with the new content...")
-                        # We need to reload the presentation object to have a fresh one to edit
-                        prs_to_edit = Presentation(io.BytesIO(file_content))
-                        updated_prs = update_presentation_with_new_text(prs_to_edit, modified_texts)
-
-                        # 4. Save and provide download link
-                        st.write("Step 4/4: Preparing your download...")
-                        output_buffer = io.BytesIO()
-                        updated_prs.save(output_buffer)
-                        output_buffer.seek(0)
-                        
-                        base, ext = os.path.splitext(original_filename)
-                        new_filename = f"{base}_ai_modified.pptx"
-
-                        st.success("🎉 Your presentation has been successfully modified!")
-                        
-                        st.download_button(
-                            label="Download Modified PowerPoint",
-                            data=output_buffer,
-                            file_name=new_filename,
-                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                        )
-                except Exception as e:
-                    st.error(f"A critical error occurred: {e}")
-else:
-    st.info("Upload a PowerPoint file and provide your API key and instructions in the sidebar to begin.")
-
