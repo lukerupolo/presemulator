@@ -56,6 +56,14 @@ def find_slide_by_ai(api_key, prs, slide_type_prompt, deck_name):
     except Exception as e:
         return {"slide": None, "index": -1, "justification": f"An error occurred during analysis: {e}"}
 
+def find_slide_in_templates(api_key, template_prs_list, slide_type_prompt):
+    """Searches through all template presentations to find the best layout slide."""
+    for i, prs in enumerate(template_prs_list):
+        result = find_slide_by_ai(api_key, prs, slide_type_prompt, f"Template Deck {i+1}")
+        if result and result["slide"]:
+            return result
+    return {"slide": None, "index": -1, "justification": "Could not find a suitable layout in any template deck."}
+
 def get_slide_content(slide):
     """Extracts title and body text from a slide."""
     if not slide: return {"title": "", "body": ""}
@@ -71,7 +79,7 @@ def populate_slide(slide, content):
         if hasattr(shape, 'is_placeholder') and shape.is_placeholder:
             if shape.placeholder_format.type in ('TITLE', 'CENTER_TITLE'): title_shape = shape
             elif shape.placeholder_format.type in ('BODY', 'OBJECT'): body_shape = shape
-    if not body_shape: # Fallback for non-standard templates
+    if not body_shape:
          text_boxes = sorted([s for s in slide.shapes if s.has_text_frame and "lorem ipsum" in s.text.lower()], key=lambda s: s.top)
          if text_boxes: body_shape = text_boxes[0]
     
@@ -112,15 +120,17 @@ if template_files and gtm_file and api_key and st.session_state.structure:
         with st.spinner("Assembling your new presentation..."):
             try:
                 st.write("Step 1/3: Loading decks...")
-                # CRITICAL: Use the first template as the base for the new presentation.
-                new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
+                template_prs_list = [Presentation(io.BytesIO(f.getvalue())) for f in template_files]
                 gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
+                
+                # CRITICAL FIX: Use the first template as the base for the new presentation.
+                new_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
                 
                 process_log = []
                 st.write("Step 2/3: Building new presentation based on your structure...")
                 
                 if len(st.session_state.structure) > len(new_prs.slides):
-                    st.warning(f"Warning: Your defined structure has more steps ({len(st.session_state.structure)}) than the template has slides ({len(new_prs.slides)}). Extra steps will be ignored.")
+                    st.warning(f"Warning: Your defined structure has more steps ({len(st.session_state.structure)}) than the template has slides ({len(new_prs.slides)}). Extra steps will be ignored, and the final deck will have {len(new_prs.slides)} slides.")
 
                 for i, dest_slide in enumerate(new_prs.slides):
                     if i >= len(st.session_state.structure):
@@ -174,4 +184,3 @@ if template_files and gtm_file and api_key and st.session_state.structure:
                 st.error(f"A critical error occurred: {e}"); st.exception(e)
 else:
     st.info("Please provide an API Key, upload at least one Template Deck and a GTM Deck, and define the structure in the sidebar to begin.")
-
