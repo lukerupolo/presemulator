@@ -2,12 +2,97 @@ import streamlit as st
 from pptx import Presentation
 from pptx.util import Pt
 from pptx.enum.shapes import MSO_SHAPE_TYPE
+from pptx.enum.dml import MSO_FILL_TYPE # Import for fill type checking
 from pptx.dml.color import RGBColor
 import io
 import copy
 import uuid
 import openai
 import json
+from lxml import etree # Used for direct XML manipulation for backgrounds
+
+# --- Helper Function for Copying Background ---
+def copy_slide_background(src_slide, dest_slide):
+    """
+    Copies the background properties (fill type, color, and image if present)
+    from the src_slide to the dest_slide. This involves low-level XML manipulation
+    for image backgrounds to ensure correct embedding and relationships.
+    """
+    src_slide_elm = src_slide.element
+    dest_slide_elm = dest_slide.element
+
+    # Find the background properties element in the source slide
+    # This element holds the information about the slide's fill (solid, gradient, picture)
+    src_bg_pr = src_slide_elm.find('.//p:bgPr', namespaces=src_slide_elm.nsmap)
+    
+    # If there's no explicit background property on the source slide, there's nothing to copy.
+    # It means the background is likely inherited from the slide master/layout.
+    if src_bg_pr is None:
+        return
+
+    # Check if the source background is a picture fill
+    src_blip_fill = src_bg_pr.find('.//a:blipFill', namespaces=src_slide_elm.nsmap)
+    
+    if src_blip_fill is not None:
+        # If it's a picture background, we need to copy the image data and create a new relationship.
+        src_blip = src_blip_fill.find('.//a:blip', namespaces=src_slide_elm.nsmap)
+        if src_blip is not None and '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed' in src_blip.attrib:
+            rId = src_blip.attrib['{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed']
+            
+            try:
+                # Get the image part (the actual image data) from the source presentation
+                src_image_part = src_slide.part.related_part(rId)
+                image_bytes = src_image_part.blob
+                
+                # Add the image to the destination presentation's media manager.
+                # python-pptx handles generating a new rId and saving the image data.
+                new_image_part = dest_slide.part.get_or_add_image_part(image_bytes, src_image_part.content_type)
+                # Create a new relationship from the destination slide to the newly added image part
+                new_rId = dest_slide.part.relate_to(new_image_part, 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image')
+
+                # Deep copy the entire background properties XML element
+                new_bg_pr = copy.deepcopy(src_bg_pr)
+                # Update the rId in the copied XML to point to the new image part in the destination presentation
+                new_blip = new_bg_pr.find('.//a:blip', namespaces=new_bg_pr.nsmap)
+                if new_blip is not None:
+                    new_blip.attrib['{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed'] = new_rId
+
+                # Remove any existing background properties from the destination slide before appending the new one
+                # This ensures we don't end up with multiple conflicting backgrounds
+                current_bg = dest_slide_elm.find('.//p:bg', namespaces=dest_slide_elm.nsmap)
+                if current_bg is not None:
+                    current_bg.getparent().remove(current_bg)
+                
+                # Append the newly copied and updated background properties to the destination slide's element
+                dest_slide_elm.append(new_bg_pr)
+                
+            except Exception as e:
+                print(f"Warning: Could not copy background image. Error: {e}")
+                # Fallback to copying solid/gradient background if image copy fails
+                copy_solid_or_gradient_background(src_slide, dest_slide)
+
+    else:
+        # If not a picture background, it's likely a solid fill, gradient fill, or no background (inherits from master).
+        # We can try to copy the existing background properties XML directly.
+        copy_solid_or_gradient_background(src_slide, dest_slide)
+
+def copy_solid_or_gradient_background(src_slide, dest_slide):
+    """
+    Helper to copy solid or gradient background fills using direct XML copy.
+    """
+    src_slide_elm = src_slide.element
+    dest_slide_elm = dest_slide.element
+    src_bg_pr = src_slide_elm.find('.//p:bgPr', namespaces=src_slide_elm.nsmap)
+
+    if src_bg_pr is not None:
+        new_bg_pr = copy.deepcopy(src_bg_pr) # Deep copy the XML element
+
+        # Remove existing background properties from destination slide (if any)
+        current_bg = dest_slide_elm.find('.//p:bg', namespaces=dest_slide_elm.nsmap)
+        if current_bg is not None:
+            current_bg.getparent().remove(current_bg)
+        
+        dest_slide_elm.append(new_bg_pr) # Append the copied properties
 
 # --- Core PowerPoint Functions ---
 
@@ -17,6 +102,7 @@ def deep_copy_slide_content(dest_slide, src_slide):
     destination slide, handling different shape types robustly.
     This approach aims to minimize repair issues by using python-pptx's API
     for common shape types, especially images and text.
+    It also now attempts to copy the slide's explicit background.
     """
     # Clear all shapes from the destination slide first to prepare it.
     # This loop safely removes shapes by iterating on a copy of the shapes list.
@@ -68,7 +154,7 @@ def deep_copy_slide_content(dest_slide, src_slide):
                         new_run.font.size = run.font.size
                     
                     # Copy font color if it's a solid fill RGB color
-                    if run.font.fill.type == 1: # MSO_FILL_TYPE.SOLID
+                    if run.font.fill.type == MSO_FILL_TYPE.SOLID: # Use MSO_FILL_TYPE enum
                         new_run.font.fill.solid()
                         try:
                             # Ensure color is an RGBColor object for direct assignment
@@ -99,6 +185,10 @@ def deep_copy_slide_content(dest_slide, src_slide):
             # but is the best general approach without parsing deeper XML.
             new_el = copy.deepcopy(shape.element)
             dest_slide.shapes._spTree.insert_element_before(new_el, 'p:extLst')
+    
+    # --- NEW: Call the background copying function after all shapes are processed ---
+    copy_slide_background(src_slide, dest_slide)
+
 
 def find_slide_by_ai(api_key, prs, slide_type_prompt, deck_name):
     """
