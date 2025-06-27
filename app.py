@@ -12,13 +12,26 @@ def clone_slide(pres, slide_to_clone):
     the slides in the destination presentation `pres`. This is a robust method
     that correctly handles all slide parts and relationships (like images).
     """
+    # 1. Get the source slide's part (the XML representation of the slide).
     src_part = slide_to_clone.part
-    new_part = pres.part.package.add_part(
+
+    # 2. Add a new slide part to the destination presentation's package.
+    # This copies the raw XML and binary content of the slide.
+    # The package handles assigning a unique name if a conflict exists.
+    # We access the package through the presentation's part.
+    package = pres.part.package
+    new_part = package.get_or_create_part(
         src_part.partname, src_part.content_type, src_part.blob
     )
+
+    # 3. Add the new slide part to the presentation's main slide list.
+    # This makes the slide "visible" in the slide sequence.
     pres.slides.add_slide(new_part)
 
+    # 4. Copy relationships from the source slide to the new slide.
+    # This is CRITICAL for images, charts, etc.
     for rel in src_part.rels:
+        # If the relationship is external (e.g., a hyperlink), copy it as is.
         if rel.is_external:
             new_part.rels.add_relationship(
                 rel.reltype, rel.target_ref, rel.rId, is_external=True
@@ -26,13 +39,18 @@ def clone_slide(pres, slide_to_clone):
             continue
         
         target_part = rel.target_part
-        if not pres.part.package.has_part(target_part.partname):
-            pres.part.package.add_part(
+        # If the target part of the relationship (e.g., an image file) isn't already
+        # in the destination package...
+        if not package.has_part(target_part.partname):
+            # ...add it to the destination package.
+            package.get_or_create_part(
                 target_part.partname, target_part.content_type, target_part.blob
             )
+        # Create the relationship from the new slide to the now-guaranteed-to-exist target part.
         new_part.relate_to(target_part, rel.reltype, rId=rel.rId)
 
     return pres.slides[-1]
+
 
 def find_slides_by_title(prs, title_keyword):
     """Finds all slides in a presentation containing a keyword in their title area."""
@@ -93,68 +111,6 @@ if template_files and gtm_file:
     if st.button("🚀 Assemble Regional Deck", type="primary"):
         with st.spinner("Assembling your new presentation..."):
             try:
-                # --- Step 1: Load all decks ---
-                st.write("Step 1/4: Loading and analyzing decks...")
-                base_template_prs = Presentation(io.BytesIO(template_files[0].getvalue()))
-                gtm_prs = Presentation(io.BytesIO(gtm_file.getvalue()))
-                
-                # Create a new presentation to build into
-                new_prs = Presentation()
-                new_prs.slide_width = base_template_prs.slide_width
-                new_prs.slide_height = base_template_prs.slide_height
-
-                # --- Step 2: Get the list of "Objectives" slides from the GTM deck ---
-                st.write("Step 2/4: Identifying content slides from GTM Deck...")
-                gtm_objectives_slides = find_slides_by_title(gtm_prs, "objectives")
-                gtm_objectives_queue = list(gtm_objectives_slides) # Create a queue to draw from
-                st.success(f"Found {len(gtm_objectives_queue)} 'Objectives' slides in the GTM deck to use as content.")
-
-                # --- Step 3: Iterate through the template and build the new deck ---
-                st.write("Step 3/4: Building new presentation from template structure...")
-                for template_slide in base_template_prs.slides:
-                    # Check if the slide is an 'Objectives' slide
-                    if is_slide_of_type(template_slide, "objectives"):
-                        if gtm_objectives_queue:
-                            # If it is, take the next available slide from the GTM deck and clone it
-                            gtm_slide_to_clone = gtm_objectives_queue.pop(0)
-                            clone_slide(new_prs, gtm_slide_to_clone)
-                        else:
-                            st.warning("Template has an 'Objectives' slide, but no more content slides were found in the GTM deck. Skipping.")
-                    
-                    # Check if the slide is an 'Activation' slide
-                    elif is_slide_of_type(template_slide, "activation"):
-                        # If it is, clone the template slide
-                        newly_cloned_slide = clone_slide(new_prs, template_slide)
-                        # And then populate it with placeholder text
-                        for shape in newly_cloned_slide.shapes:
-                            if shape.has_text_frame and "Lorem Ipsum" in shape.text:
-                                populate_text_in_shape(shape, "Placeholder for regional activation details.\n- Tactic 1: [INSERT REGIONAL TACTIC]\n- Tactic 2: [INSERT REGIONAL TACTIC]\n- Budget: [INSERT REGIONAL BUDGET]")
-                                break # Assume we only populate one placeholder
-                    
-                    # Otherwise, it's a standard slide to be copied as-is
-                    else:
-                        clone_slide(new_prs, template_slide)
-                
-                st.success("Successfully built the new presentation structure.")
-
-                # --- Step 4: Finalize and provide download ---
-                st.write("Step 4/4: Finalizing and preparing download...")
-                output_buffer = io.BytesIO()
-                new_prs.save(output_buffer)
-                output_buffer.seek(0)
-
-                st.success("🎉 Your new regional presentation has been assembled!")
-                new_filename = "Regional_Deck_Assembled.pptx"
-                st.download_button(
-                    label="Download Assembled PowerPoint",
-                    data=output_buffer,
-                    file_name=new_filename,
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                )
-
-            except Exception as e:
-                st.error(f"A critical error occurred: {e}")
-                st.exception(e)
-
-else:
-    st.info("Please upload both a GTM Global Deck and at least one Template Deck to begin.")
+                # --- Step 1: Load decks and create a stable base presentation ---
+                st.write("Step 1/4: Loading decks and preparing a clean base...")
+                # Use the first uploaded template as the base for our new presentat
