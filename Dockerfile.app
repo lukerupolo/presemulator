@@ -1,24 +1,28 @@
-# Dockerfile.app
-# Use an official Python runtime as a parent image
-FROM python:3.10-slim-buster
+        # Dockerfile.app
+        # Use an official Python runtime as a parent image
+        FROM python:3.10-slim-buster
 
-# Set the working directory in the container
-WORKDIR /app
+        # Install git for cloning repositories
+        RUN apt-get update && \
+            apt-get install -y --no-install-recommends git && \
+            rm -rf /var/lib/apt/lists/* && \
+            apt-get clean
 
-# Copy the requirements file into the container at /app
-COPY requirements_app.txt .
+        # Set the working directory in the container
+        WORKDIR /app
 
-# Install any needed packages specified in requirements.txt
-RUN pip install --no-cache-dir -r requirements_app.txt
+        # Copy the requirements file into the container at /app
+        COPY requirements_app.txt .
 
-# Copy the rest of the application code into the container
-COPY app.py .
+        # Install any needed packages specified in requirements.txt
+        RUN pip install --no-cache-dir -r requirements_app.txt
 
-# Expose the port Streamlit runs on
-EXPOSE 8501
+        # Copy the rest of the application code into the container
+        COPY app.py .
 
-# Command to run the Streamlit application
-# Use environment variables for sensitive data and service URLs
-# CONVERSION_SERVICE_URL will be set during deployment (e.g., in Kubernetes Deployment, Cloud Run)
-# OPENAI_API_KEY will also be set during deployment
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+        # Expose the port Streamlit runs on
+        EXPOSE 8501
+
+        # Command to run the Streamlit application
+        CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+        
