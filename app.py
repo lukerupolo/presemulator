@@ -18,10 +18,12 @@ import mimetypes  # For determining file types
 
 # --- Configuration for the Conversion Service ---
 CONVERSION_SERVICE_URL = os.getenv("CONVERSION_SERVICE_URL", "http://localhost:8000/convert_document")
-# Get GitHub Token from environment variable. Set this securely in your deployment.
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+# GITHUB_TOKEN is not directly needed if not pulling from GitHub.
+# GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") # You can remove this or keep it if other parts of your app use it.
 
 # --- Helper Function for Cloning and Downloading Files from GitHub ---
+# This function (_download_files_from_github) is typically not needed if you only use file uploader.
+# If you want to keep both options (GitHub and local upload), you'd need conditional logic.
 @st.cache_data(show_spinner="Cloning GitHub repository and finding files...")
 def _download_files_from_github(repo_url: str, branch: str, file_paths_or_patterns: list[str]) -> list[tuple[bytes, str, str]]:
     """
@@ -507,24 +509,28 @@ st.set_page_config(page_title="Dynamic AI Presentation Assembler", layout="wide"
 st.title("📊 Dynamic AI Presentation Assembler")
 
 with st.sidebar:
-    st.header("1. API Key & Decks")
+    st.header("1. API Key") # Adjusted header
     api_key = st.text_input("OpenAI API Key", type="password")
     st.markdown("---")
-    st.header("2. Input Documents from GitHub")
-    st.info("Files will be pulled from the specified GitHub repository. Ensure the GITHUB_TOKEN environment variable is set for private repos.")
-    github_repo_url = st.text_input("GitHub Repository URL (e.g., https://github.com/org/repo-name.git)", value="https://github.com/lukerupolo/presemulator.git")
-    github_branch = st.text_input("GitHub Branch (optional, default: main)", value="main")
-    
-    st.subheader("Template Documents Paths")
-    template_paths_raw = st.text_area(
-        "Comma-separated paths/folders for Template Deck(s) within repo (e.g., templates/part1.pptx, templates/part2/, templates/cover.pdf)",
-        value="templates/slide_template.pptx" # Example path, replace with your actual
+    st.header("2. Input Documents (Drag & Drop)") # Adjusted header
+    st.info("Upload your PPTX or PDF files directly.")
+
+    st.subheader("Upload Template Documents")
+    # Allow multiple template files
+    uploaded_template_files = st.file_uploader(
+        "Drag and drop your Template PPTX/PDF files here",
+        type=["pptx", "pdf"],
+        accept_multiple_files=True,
+        key="template_uploader"
     )
     
-    st.subheader("GTM Global Document Path")
-    gtm_paths_raw = st.text_area(
-        "Comma-separated paths/folders for GTM Global Deck(s) within repo (e.g., gtm/global.pptx, gtm/report.pdf)",
-        value="gtm_decks/example_gtm.pdf" # Example path, replace with your actual
+    st.subheader("Upload GTM Global Document")
+    # Allow only one GTM file for simplicity based on your current logic
+    uploaded_gtm_file = st.file_uploader(
+        "Drag and drop your GTM Global PPTX/PDF file here",
+        type=["pptx", "pdf"],
+        accept_multiple_files=False, # Assuming only one GTM file
+        key="gtm_uploader"
     )
 
     st.markdown("---")
@@ -555,44 +561,23 @@ with st.sidebar:
         st.rerun()
 
 # --- Main App Logic ---
-if github_repo_url and template_paths_raw and gtm_paths_raw and api_key and st.session_state.structure:
-    template_paths = [p.strip() for p in template_paths_raw.split(',') if p.strip()]
-    gtm_paths = [p.strip() for p in gtm_paths_raw.split(',') if p.strip()]
-
-    if not template_paths:
-        st.error("Please provide at least one path for Template Deck(s).")
-        st.stop()
-    if not gtm_paths:
-        st.error("Please provide at least one path for GTM Global Deck(s).")
-        st.stop()
-
+# Update this section to use the uploaded files instead of GitHub paths
+if uploaded_template_files and uploaded_gtm_file and api_key and st.session_state.structure:
     if st.button("🚀 Assemble Presentation", type="primary"):
         with st.spinner("Assembling your new presentation..."):
             try:
-                st.write("Step 1/3: Pulling documents from GitHub...")
+                st.write("Step 1/3: Loading and processing uploaded documents...")
                 
-                all_template_downloaded_files = _download_files_from_github(github_repo_url, github_branch, template_paths)
-                all_gtm_downloaded_files = _download_files_from_github(github_repo_url, github_branch, gtm_paths)
-
-                if not all_template_downloaded_files:
-                    st.error("No template files found or downloaded from GitHub. Please check paths and repository.")
-                    st.stop()
-                if not all_gtm_downloaded_files:
-                    st.error("No GTM files found or downloaded from GitHub. Please check paths and repository.")
-                    st.stop()
-                
-                # For GTM, we process only the first found file for now
-                gtm_file_to_process_bytes, gtm_file_to_process_type, gtm_file_to_process_name = all_gtm_downloaded_files[0]
-                if len(all_gtm_downloaded_files) > 1:
-                    st.warning(f"Multiple GTM files found. Only '{gtm_file_to_process_name}' will be processed.")
-
-                st.write("Step 2/3: Loading and processing documents...")
-                
+                # Process uploaded template files
+                all_template_slides_for_ai = []
                 base_pptx_template_found = False
                 new_prs = None 
-                all_template_slides_for_ai = [] 
 
-                for file_bytes, file_type, file_name in all_template_downloaded_files:
+                for uploaded_file in uploaded_template_files:
+                    file_bytes = uploaded_file.read()
+                    file_type = uploaded_file.type
+                    file_name = uploaded_file.name
+
                     if file_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
                         if not base_pptx_template_found:
                             new_prs = Presentation(io.BytesIO(file_bytes))
@@ -606,14 +591,26 @@ if github_repo_url and template_paths_raw and gtm_paths_raw and api_key and st.s
                                 new_slide = new_prs.slides.add_slide(new_prs.slide_layouts[0]) 
                                 deep_copy_slide_content(new_slide, slide_to_merge) 
                     
+                    # Get slide data for AI analysis for all template files (PPTX or PDF)
                     all_template_slides_for_ai.extend(get_all_slide_data(file_bytes, file_type))
 
                 if new_prs is None:
-                    st.error("Error: At least one PPTX file must be found in the 'Template Documents Paths' to serve as the base for the assembled presentation.")
+                    st.error("Error: At least one PPTX file must be uploaded as a 'Template Document' to serve as the base for the assembled presentation.")
                     st.stop() 
 
+                # Process the single uploaded GTM file
+                gtm_file_to_process_bytes = uploaded_gtm_file.read()
+                gtm_file_to_process_type = uploaded_gtm_file.type
+                gtm_file_to_process_name = uploaded_gtm_file.name
+                st.info(f"Using '{gtm_file_to_process_name}' as the GTM Global Document.")
+
+
                 process_log = []
-                st.write("Step 3/3: Building new presentation based on your structure...")
+                st.write("Step 2/3: Building new presentation based on your structure...")
+                
+                # ... (rest of the logic related to new_prs, process_log, and iterating through st.session_state.structure)
+                # This part remains largely the same, but now it uses `gtm_file_to_process_bytes` etc.
+                # The logic for `num_template_slides` and `num_structure_steps` remains valid.
                 
                 num_template_slides = len(new_prs.slides) 
                 num_structure_steps = len(st.session_state.structure)
@@ -645,6 +642,15 @@ if github_repo_url and template_paths_raw and gtm_paths_raw and api_key and st.s
                             result = find_slide_by_ai(api_key, gtm_file_to_process_bytes, gtm_file_to_process_type, keyword, "GTM Deck")
                             log_entry["log"].append(f"**GTM Content Choice Justification (PPTX Copy):** {result['justification']}")
                             if result["slide"]:
+                                # Need to ensure the source slide is accessible from the Presentation object
+                                # The 'slide' in result is just data (text, image_data), not the actual pptx.parts.slide.Slide object.
+                                # So, you'd need to re-locate the slide object from gtm_prs if you truly want to deep copy shapes.
+                                # For a direct copy from PPTX, `deep_copy_slide_content` needs the actual `Slide` object.
+                                # For a full deep copy, you'd load the GTM Presentation again here
+                                # or adapt deep_copy_slide_content to work with raw bytes and index
+                                # For simplicity, let's assume we use the AI's content and populate.
+                                # If you truly want to copy original shapes from PPTX, you need to load `gtm_prs`
+                                # and get `gtm_prs.slides[result["index"]]` here.
                                 src_slide_object = gtm_prs.slides[result["index"]] 
                                 deep_copy_slide_content(dest_slide, src_slide_object)
                                 log_entry["log"].append(f"**Action:** Replaced Template slide {current_dest_slide_index + 1} with content from GTM PPTX slide {result['index'] + 1}.")
@@ -734,5 +740,4 @@ if github_repo_url and template_paths_raw and gtm_paths_raw and api_key and st.s
                 st.error(f"A critical error occurred: {e}")
                 st.exception(e)
 else:
-    st.info("Please provide an API Key, GitHub Repository URL, paths to Template/GTM documents, and define the structure in the sidebar to begin.")
-
+    st.info("Please provide an API Key, upload your Template/GTM documents, and define the structure in the sidebar to begin.")
