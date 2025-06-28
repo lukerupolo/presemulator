@@ -31,11 +31,6 @@ def _convert_pptx_to_images_and_text(pptx_bytes: bytes) -> list[dict]:
         with open(pptx_path, "wb") as f:
             f.write(pptx_bytes)
 
-        # Use unoconv to convert PPTX to images (one PNG per slide)
-        # --unocr: Enable OCR (useful if PPTX contains image-based text)
-        # --export-filter: 'impress' usually implies presentation slides
-        # -f png: Output format is PNG
-        # -o: Output path (template for multiple files)
         try:
             # Command to convert slides to individual PNGs
             command_render = [
@@ -43,7 +38,11 @@ def _convert_pptx_to_images_and_text(pptx_bytes: bytes) -> list[dict]:
                 "--output", os.path.join(output_dir, "slide-.png"), # unoconv adds page number
                 pptx_path
             ]
-            subprocess.run(command_render, check=True, capture_output=True, text=True)
+            # MODIFIED: Capture output and check return code manually for better error reporting
+            result = subprocess.run(command_render, capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                # Raise a CalledProcessError to be caught below, including stdout/stderr
+                raise subprocess.CalledProcessError(result.returncode, command_render, output=result.stdout, stderr=result.stderr)
             
             # Use python-pptx to extract text, as unoconv doesn't give text directly
             from pptx import Presentation
@@ -77,7 +76,15 @@ def _convert_pptx_to_images_and_text(pptx_bytes: bytes) -> list[dict]:
                     "image_data": image_data
                 })
         except subprocess.CalledProcessError as e:
-            raise HTTPException(status_code=500, detail=f"PPTX conversion failed: {e.stderr}")
+            # MODIFIED: Include both stdout and stderr in the error detail
+            detail_message = f"PPTX conversion failed. unoconv exited with code {e.returncode}.\n"
+            if e.stdout:
+                detail_message += f"stdout:\n{e.stdout}\n"
+            if e.stderr:
+                detail_message += f"stderr:\n{e.stderr}\n"
+            if not e.stdout and not e.stderr:
+                detail_message += "No output captured from unoconv (check if LibreOffice is fully configured for headless mode)."
+            raise HTTPException(status_code=500, detail=detail_message)
         except FileNotFoundError:
             raise HTTPException(status_code=500, detail="unoconv or LibreOffice not found. Please ensure LibreOffice and unoconv are installed and in PATH.")
         except Exception as e:
