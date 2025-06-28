@@ -8,12 +8,14 @@ import fitz # PyMuPDF
 import os
 import shutil
 import tempfile
-import json # For logging output
-import traceback # <-- ADD THIS LINE
+import json
+import traceback
 
 app = FastAPI()
 
-# --- Helper functions for document conversion ---
+# --- THE FIX: PROVIDE THE FULL PATH TO UNOCONV ---
+# We specify the full path to the unoconv executable to avoid any PATH issues.
+UNOCONV_PATH = r"C:\Users\lukin\AppData\Local\Programs\Python\Python313\Scripts\unoconv"
 
 def _convert_pptx_to_images_and_text(pptx_bytes: bytes) -> list[dict]:
     """
@@ -31,12 +33,14 @@ def _convert_pptx_to_images_and_text(pptx_bytes: bytes) -> list[dict]:
             f.write(pptx_bytes)
 
         try:
+            # --- MODIFIED COMMAND: Use the full path from UNOCONV_PATH ---
             command_render = [
-                "unoconv", "-f", "png", 
+                UNOCONV_PATH, "-f", "png", 
                 "--output", os.path.join(output_dir, "slide-.png"),
                 pptx_path
             ]
-            result = subprocess.run(command_render, capture_output=True, text=True, check=False)
+            # Use shell=True on Windows if direct execution fails, as it helps resolve command paths.
+            result = subprocess.run(command_render, capture_output=True, text=True, check=False, shell=True)
             if result.returncode != 0:
                 raise subprocess.CalledProcessError(result.returncode, command_render, output=result.stdout, stderr=result.stderr)
             
@@ -75,17 +79,14 @@ def _convert_pptx_to_images_and_text(pptx_bytes: bytes) -> list[dict]:
                 detail_message += "No output captured from unoconv (check if LibreOffice is fully configured for headless mode)."
             raise HTTPException(status_code=500, detail=detail_message)
         except FileNotFoundError:
-            raise HTTPException(status_code=500, detail="unoconv or LibreOffice not found. Please ensure LibreOffice and unoconv are installed and in PATH.")
+            # This error is now much more specific if it happens
+            raise HTTPException(status_code=500, detail=f"The command '{UNOCONV_PATH}' was not found. Please verify the path is correct.")
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"An unexpected error occurred during PPTX processing: {e}")
             
     return results
 
 def _convert_pdf_to_images_and_text(pdf_bytes: bytes) -> list[dict]:
-    """
-    Converts a PDF file to a list of Base64 encoded PNG images, one per page,
-    and extracts text from each page. Uses PyMuPDF (fitz).
-    """
     results = []
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -104,14 +105,9 @@ def _convert_pdf_to_images_and_text(pdf_bytes: bytes) -> list[dict]:
         raise HTTPException(status_code=500, detail=f"PDF conversion failed: {e}")
     return results
 
-# MODIFIED ENDPOINT WITH FULL ERROR LOGGING
 @app.post("/convert_document")
 async def convert_document_endpoint(file: UploadFile = File(...)):
-    """
-    Endpoint to convert an uploaded PPTX or PDF document into a list of
-    slide/page data (text and Base64 image).
-    """
-    try: # <-- START OF OUR NEW ERROR CATCHER
+    try:
         file_bytes = await file.read()
         file_type = file.content_type
 
@@ -124,10 +120,8 @@ async def convert_document_endpoint(file: UploadFile = File(...)):
         
         return JSONResponse(content={"slides": slides_data})
 
-    except Exception as e: # <-- THIS WILL CATCH ANY ERROR
-        # PRINT THE FULL ERROR TRACEBACK TO THE CONSOLE
+    except Exception as e:
         print("--- AN UNHANDLED ERROR OCCURRED ---")
         traceback.print_exc()
         print("-----------------------------------")
-        # Re-raise the exception to send the 500 error back to Streamlit
         raise HTTPException(status_code=500, detail=f"A critical error occurred in the conversion service: {e}")
