@@ -13,9 +13,9 @@ import traceback
 
 app = FastAPI()
 
-# --- THE FIX: PROVIDE THE FULL PATH TO UNOCONV ---
-# We specify the full path to the unoconv executable to avoid any PATH issues.
-UNOCONV_PATH = r"C:\Users\lukin\AppData\Local\Programs\Python\Python313\Scripts\unoconv"
+# --- THE FIX: SPECIFY THE PYTHON EXECUTABLE AND THE SCRIPT PATH ---
+PYTHON_EXECUTABLE_PATH = r"C:\Users\lukin\AppData\Local\Programs\Python\Python313\python.exe"
+UNOCONV_SCRIPT_PATH = r"C:\Users\lukin\AppData\Local\Programs\Python\Python313\Scripts\unoconv"
 
 def _convert_pptx_to_images_and_text(pptx_bytes: bytes) -> list[dict]:
     """
@@ -33,14 +33,16 @@ def _convert_pptx_to_images_and_text(pptx_bytes: bytes) -> list[dict]:
             f.write(pptx_bytes)
 
         try:
-            # --- MODIFIED COMMAND: Use the full path from UNOCONV_PATH ---
+            # --- FINAL COMMAND: Tell Windows to use python.exe to run the unoconv script ---
             command_render = [
-                UNOCONV_PATH, "-f", "png", 
+                PYTHON_EXECUTABLE_PATH,
+                UNOCONV_SCRIPT_PATH, 
+                "-f", "png", 
                 "--output", os.path.join(output_dir, "slide-.png"),
                 pptx_path
             ]
-            # Use shell=True on Windows if direct execution fails, as it helps resolve command paths.
-            result = subprocess.run(command_render, capture_output=True, text=True, check=False, shell=True)
+            
+            result = subprocess.run(command_render, capture_output=True, text=True, check=False)
             if result.returncode != 0:
                 raise subprocess.CalledProcessError(result.returncode, command_render, output=result.stdout, stderr=result.stderr)
             
@@ -79,8 +81,7 @@ def _convert_pptx_to_images_and_text(pptx_bytes: bytes) -> list[dict]:
                 detail_message += "No output captured from unoconv (check if LibreOffice is fully configured for headless mode)."
             raise HTTPException(status_code=500, detail=detail_message)
         except FileNotFoundError:
-            # This error is now much more specific if it happens
-            raise HTTPException(status_code=500, detail=f"The command '{UNOCONV_PATH}' was not found. Please verify the path is correct.")
+            raise HTTPException(status_code=500, detail=f"The command '{PYTHON_EXECUTABLE_PATH}' was not found. Please verify the path is correct.")
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"An unexpected error occurred during PPTX processing: {e}")
             
